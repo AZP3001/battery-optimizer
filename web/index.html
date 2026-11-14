@@ -292,6 +292,8 @@
 
   <!-- Storage: what uses space, apps and files by size; uninstall, clear data, delete -->
   <section id="tab-storage" class="hidden">
+    <div id="storageGate"></div>
+    <div id="storageBody" class="hidden">
     <div class="card" id="storageSummary"><span class="spinner"></span></div>
     <div class="toolbar" style="margin-top:20px">
       <div class="seg" id="storageView"><button type="button" data-v="apps">Apps by size</button><button type="button" data-v="files">Files by size</button></div>
@@ -300,6 +302,8 @@
     <div class="chips hidden" id="fileChips"></div>
     <div class="list" id="storageList"></div>
     <div class="applybar" id="storageBar"></div>
+    <input type="file" id="restoreFiles" accept=".zip" multiple hidden>
+    </div>
   </section>
 
   <!-- Install: .apk files and split bundles from this computer -->
@@ -314,7 +318,8 @@
 
   <!-- Cleanup: everything from the script's cleanup tool. Deletes ask for the phone's screen lock. -->
   <section id="tab-cleanup" class="hidden">
-    <div class="perm-layout">
+    <div id="cleanupGate"></div>
+    <div id="cleanupBody" class="perm-layout hidden">
       <div class="list perm-list" id="cleanNav"></div>
       <div id="cleanPane"></div>
     </div>
@@ -322,7 +327,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the full Cleanup tool. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>.</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.3</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -1636,8 +1641,15 @@ function renderStorageBar() {
       bar.clear = el("button", "btn", "Clear data"); bar.uninstall = el("button", "btn danger", "Uninstall");
       bar.clear.onclick = () => storageAppAction(bar.clear, selectedStorageRows(), "clear");
       bar.uninstall.onclick = () => storageAppAction(bar.uninstall, selectedStorageRows(), "uninstall");
-      bar.acts = [bar.clear, bar.uninstall];
-      $("#storageBar").replaceChildren(bar.info, bar.caches, bar.clear, bar.uninstall);
+      bar.backup = el("button", "btn", "Back up");
+      bar.backup.title = "Save each selected app as a .zip on this computer";
+      bar.backup.onclick = () => backupApps(bar.backup, selectedStorageRows());
+      bar.restore = el("button", "btn", "Restore...");
+      bar.restore.title = "Reinstall apps from backup .zip files";
+      bar.restore.onclick = () => $("#restoreFiles").click();
+      $("#restoreFiles").onchange = (e) => { const f = [...e.target.files]; e.target.value = ""; if (f.length) restoreBackups(bar.restore, f).catch(showError); };
+      bar.acts = [bar.backup, bar.clear, bar.uninstall];
+      $("#storageBar").replaceChildren(bar.info, bar.caches, bar.restore, bar.backup, bar.clear, bar.uninstall);
     } else {
       bar.reload = el("button", "btn", "Choose folders");
       bar.reload.onclick = () => { FILES = null; storageSel.clear(); renderStorageList(); };
@@ -1708,28 +1720,38 @@ async function deleteFiles(btn, rows) {
 
 // ---------- screen lock check: every delete, reset, uninstall and clear-data asks for it ----------
 // The phone checks the code itself ("locksettings verify"), so a wrong code changes nothing. The field shows dots.
+// The phone checks the code itself ("locksettings verify"). Resolves to "" when right, else the reason.
+// The answer can repeat the typed code, so it is never logged.
+async function checkLock(code) {
+  // Not queued: the Unlock button already runs inside the queue, and a nested queue would wait forever.
+  const out = await sh(code ? `locksettings verify --old ${q(code)}` : "locksettings verify");
+  if (/verified successfully/i.test(out)) return "";
+  if (/unknown command|usage:/i.test(out) && !/didn't match|wrong/i.test(out)) return "This phone does not let USB debugging check the screen lock, so this is blocked here. Use the script instead.";
+  return /throttl|try again|timeout/i.test(out) ? "Too many wrong tries: the phone makes you wait. Try again later."
+    : "Wrong screen lock. Wrong tries count as failed unlock attempts on the phone.";
+}
+function lockField() {
+  const pw = el("input", "search");
+  pw.type = "password"; pw.autocomplete = "off"; pw.spellcheck = false;
+  pw.placeholder = "Screen lock (a pattern as digits 1-9)";
+  pw.style.cssText = "width:100%;margin-top:8px";
+  return pw;
+}
+// Every delete, reset, uninstall, clear-data and restore asks for the screen lock.
+// Enter submits; a right code closes the dialog, a wrong one opens it again with the reason.
 async function confirmWithLock(title, text, okLabel) {
   let error = "";
   for (;;) {
-    const box = el("div"), pw = el("input", "search"), err = el("p", "small");
-    pw.type = "password"; pw.autocomplete = "off"; pw.spellcheck = false;
-    pw.placeholder = "Screen lock (a pattern as digits 1-9)";
-    pw.style.cssText = "width:100%;margin-top:8px";
+    const box = el("div"), pw = lockField(), err = el("p", "small");
     err.style.color = "var(--red)"; err.textContent = error;
     box.append(el("label", "small muted", "Type the phone's PIN, password or pattern to confirm. Leave it empty if the phone has no screen lock."), pw, err);
     pw.onkeydown = (e) => { if (e.key === "Enter") pw.closest("dialog").querySelector(".actions .primary").click(); };
     setTimeout(() => pw.focus(), 50);
     if (await modal(title, text, [["Cancel", ""], [okLabel, "ok", "primary"]], box) !== "ok") return false;
     const code = pw.value; pw.value = "";
-    // The answer can repeat the typed code, so it is never logged.
-    const out = await queue(() => sh(code ? `locksettings verify --old ${q(code)}` : "locksettings verify"));
-    if (/verified successfully/i.test(out)) return true;
-    if (/unknown command|usage:/i.test(out) && !/didn't match|wrong/i.test(out)) {
-      await modal("Cannot check the screen lock", "This phone does not let USB debugging check the screen lock, so this action is blocked here. Use the script instead.", [["OK", "ok", "primary"]]);
-      return false;
-    }
-    error = /throttl|try again|timeout/i.test(out) ? "Too many wrong tries: the phone makes you wait. Try again later."
-      : "Wrong screen lock. Wrong tries count as failed unlock attempts on the phone.";
+    error = await checkLock(code);
+    if (!error) return true;
+    if (error.startsWith("This phone does not")) { await modal("Cannot check the screen lock", error, [["OK", "ok", "primary"]]); return false; }
   }
 }
 
@@ -1830,6 +1852,27 @@ const CLEAN = [
   ["Tools", null], ["Close apps & free RAM", "ram"], ["Flush free space", "trim"], ["Install apps", "installtab"], ["App names & icons", "names"],
 ];
 let cleanChoice = "Contacts", settingsCat = "Wi-Fi";
+// Storage and Cleanup show nothing until the screen lock is typed; leaving the tab locks it again.
+let gateOpen = null;
+function lockGate(name, title, text) {
+  if (gateOpen === name) { $(`#${name}Gate`).replaceChildren(); $(`#${name}Body`).classList.remove("hidden"); return true; }
+  $(`#${name}Body`).classList.add("hidden");
+  const card = el("div", "card connect"), pw = lockField(), err = el("p", "small"), go = el("button", "btn primary big", "Unlock");
+  err.style.color = "var(--red)";
+  card.append(el("h1", "", title), el("p", "muted", text + " Leave it empty if the phone has no screen lock."), pw, err, go);
+  go.onclick = () => runButton(go, async () => {
+    const code = pw.value; pw.value = "";
+    err.textContent = await checkLock(code);
+    if (err.textContent) return false;
+    gateOpen = name;
+    lockGate(name);
+    queue(TAB_LOAD[name]).catch(showError);
+  });
+  pw.onkeydown = (e) => { if (e.key === "Enter") go.click(); };
+  $(`#${name}Gate`).replaceChildren(card);
+  setTimeout(() => pw.focus(), 50);
+  return false;
+}
 function renderCleanup() {
   $("#cleanNav").replaceChildren(...CLEAN.map(([title, kind]) => {
     if (!kind) return el("div", "group", title);
@@ -2153,11 +2196,151 @@ async function installAll(btn) {
   renderInstall();
 }
 
+// ---------- app backup and restore: one .zip per app, only on this computer ----------
+// Holds the app (every split APK), its shared-storage data (Android/data and Android/obb), and optionally Android's own
+// backup of its private data (only apps that allow it; many opt out, and logins tied to the phone's key store never move).
+const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(crc, b) { crc = ~crc; for (let i = 0; i < b.length; i++) crc = CRC_TABLE[(crc ^ b[i]) & 0xff] ^ (crc >>> 8); return ~crc >>> 0; }
+
+// Streaming ZIP writer: stored (no compression) and ZIP64, so multi-GB game data never has to fit in memory.
+function zipWriter(out) {
+  let offset = 0; const central = [], enc = new TextEncoder();
+  const le = (n, bytes) => { const a = new Uint8Array(bytes); let v = BigInt(n); for (let i = 0; i < bytes; i++) { a[i] = Number(v & 255n); v >>= 8n; } return a; };
+  const cat = (...p) => { const r = new Uint8Array(p.reduce((n, x) => n + x.length, 0)); let o = 0; for (const x of p) { r.set(x, o); o += x.length; } return r; };
+  const write = async (b) => { await out.write(b); offset += b.length; };
+  return {
+    async add(name, stream, progress) {
+      const nb = enc.encode(name), start = offset;
+      // flags 0x0808: sizes follow the data (data descriptor), UTF-8 names
+      await write(cat(le(0x04034b50, 4), le(45, 2), le(0x0808, 2), le(0, 2), le(0, 4), le(0, 4), le(0xffffffff, 4), le(0xffffffff, 4),
+        le(nb.length, 2), le(20, 2), nb, le(1, 2), le(16, 2), le(0, 8), le(0, 8)));
+      let crc = 0, size = 0;
+      const r = stream.getReader();
+      for (;;) { const { done, value } = await r.read(); if (done) break; crc = crc32(crc, value); size += value.length; await write(value); progress?.(size); }
+      await write(cat(le(0x08074b50, 4), le(crc, 4), le(size, 8), le(size, 8)));
+      central.push(cat(le(0x02014b50, 4), le(45, 2), le(45, 2), le(0x0808, 2), le(0, 2), le(0, 4), le(crc, 4), le(0xffffffff, 4), le(0xffffffff, 4),
+        le(nb.length, 2), le(28, 2), le(0, 2), le(0, 2), le(0, 2), le(0, 4), le(0xffffffff, 4), nb, le(1, 2), le(24, 2), le(size, 8), le(size, 8), le(start, 8)));
+      return size;
+    },
+    async close() {
+      const cdStart = offset;
+      for (const c of central) await write(c);
+      const cdSize = offset - cdStart, z64 = offset;
+      await write(cat(le(0x06064b50, 4), le(44, 8), le(45, 2), le(45, 2), le(0, 4), le(0, 4), le(central.length, 8), le(central.length, 8), le(cdSize, 8), le(cdStart, 8)));
+      await write(cat(le(0x07064b50, 4), le(0, 4), le(z64, 8), le(1, 4)));
+      await write(cat(le(0x06054b50, 4), le(0, 2), le(0, 2), le(0xffff, 2), le(0xffff, 2), le(0xffffffff, 4), le(0xffffffff, 4), le(0, 2)));
+      await out.close();
+    },
+  };
+}
+// A file on the phone as a stream (adb sync); the sync connection closes when the stream ends.
+async function phoneFile(path) {
+  const sync = await adb.sync();
+  const src = sync.read(path).getReader();
+  return new ReadableStream({
+    async pull(c) { const { done, value } = await src.read(); if (done) { c.close(); await sync.dispose(); } else c.enqueue(value); },
+    async cancel() { await sync.dispose(); },
+  });
+}
+const parseSizes = (out) => out.split("\n").map((l) => { const i = l.indexOf(" "); return i > 0 && /^\d+$/.test(l.slice(0, i)) ? { size: Number(l.slice(0, i)), path: l.slice(i + 1) } : null; }).filter(Boolean);
+
+async function backupApps(btn, rows) {
+  if (!window.showDirectoryPicker) { await modal("Not supported", "Saving backups needs Chrome or Edge on a computer.", [["OK", "ok", "primary"]]); return; }
+  const bu = el("input"); bu.type = "checkbox"; bu.id = "useBu";
+  const l = el("label"); l.htmlFor = "useBu"; l.append(bu, " Also Android's own backup of private data (you confirm on the phone; many apps opt out, logins usually do not transfer)");
+  l.style.cssText = "display:flex;gap:8px;align-items:flex-start;margin-top:12px";
+  const names = rows.map((x) => x.a.name).join(", ");
+  if (await modal(`Back up ${rows.length} app${rows.length > 1 ? "s" : ""}?`, `${names}\n\nEach app is saved as its own .zip in a folder you choose: the app, its data in Android/data and Android/obb (game downloads), and optionally Android's backup.`,
+    [["Cancel", ""], ["Choose folder", "ok", "primary"]], l) !== "ok") return;
+  let dir;
+  try { dir = await window.showDirectoryPicker({ mode: "readwrite", id: "battery-optimizer-backups" }); } catch { return; }
+  await runButton(btn, async (set) => {
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+    for (const [n, x] of rows.entries()) {
+      const p = x.p, tag = rows.length > 1 ? `${n + 1}/${rows.length} ` : "";
+      set(`${tag}${x.a.name}: reading...`);
+      const apks = (await sh(`pm path ${q(p)}`)).split("\n").filter((s) => s.startsWith("package:")).map((s) => s.slice(8).trim());
+      if (!apks.length) { log(`FAILED ${p}: not installed`); continue; }
+      const files = parseSizes(await sh(`find ${q("/sdcard/Android/data/" + p)} ${q("/sdcard/Android/obb/" + p)} -type f -exec stat -c '%s %n' {} + 2>/dev/null`));
+      const version = ((await sh(`dumpsys package ${q(p)} | grep -m1 versionName`)).match(/versionName=(.*)/) || [])[1]?.trim() || "";
+      const handle = await dir.getFileHandle(`${p}-${stamp}.zip`, { create: true });
+      const zip = zipWriter((await handle.createWritable()).getWriter());
+      const total = files.reduce((s, f) => s + f.size, 0);
+      let done = 0;
+      const info = { format: 1, package: p, name: x.a.name, version, phone: $("#phoneName").textContent, created: new Date().toISOString(), apks: [], files: [], androidBackup: 0 };
+      for (const [i, path] of apks.entries()) {
+        const name = `apk/${i === 0 ? "base" : "split" + i}-${path.split("/").pop()}`;
+        await zip.add(name, await phoneFile(path), (s) => set(`${tag}${x.a.name}: app part ${i + 1}/${apks.length}, ${fmtBytes(s)}`));
+        info.apks.push(name);
+      }
+      for (const f of files) {
+        const rel = f.path.replace(/^\/sdcard\//, "");
+        const before = done;
+        done += await zip.add("files/" + rel, await phoneFile(f.path), (s) => set(`${tag}${x.a.name}: data ${fmtBytes(before + s)} of ${fmtBytes(total)}`));
+        info.files.push({ path: rel, size: f.size });
+      }
+      if (bu.checked) {
+        set(`${tag}${x.a.name}: confirm the backup on the phone`);
+        const proc = await adb.subprocess.noneProtocol.spawn(`bu backup -noapk -noobb -noshared ${q(p)}`);
+        info.androidBackup = await zip.add("android-backup.ab", proc.output, (s) => set(`${tag}${x.a.name}: Android backup ${fmtBytes(s)}`));
+      }
+      await zip.add("backup.json", new Blob([JSON.stringify(info, null, 1)]).stream());
+      await zip.close();
+      log(`Backed up ${x.a.name}: ${info.apks.length} app part(s), ${info.files.length} data files (${fmtBytes(total)})` +
+        (bu.checked ? `, Android backup ${fmtBytes(info.androidBackup)}${info.androidBackup < 1024 ? " (empty: the app does not allow it)" : ""}` : ""));
+    }
+  });
+}
+
+async function restoreBackups(btn, files) {
+  const items = [];
+  for (const file of files) {
+    try {
+      const zip = await openZip(file);
+      const info = JSON.parse(new TextDecoder().decode(await zip.bytes("backup.json")));
+      // A backup may only put files back into the app's own Android/data and Android/obb folders.
+      const inside = (path) => typeof path === "string" && path.startsWith(`Android/data/${info.package}/`) || path?.startsWith(`Android/obb/${info.package}/`);
+      if (!validPkg(info.package || "") || !(info.files || []).every((f) => inside(f.path) && !f.path.split("/").includes("..")))
+        throw new Error("it wants to write outside the app's own folders");
+      items.push({ file, zip, info });
+    } catch (e) { log(`${file.name}: not a backup from this tool (${e.message})`); }
+  }
+  if (!items.length) { toast("No backups found in the chosen files."); return; }
+  const list = items.map((it) => `  ${it.info.name} ${it.info.version} (${it.info.created.slice(0, 10)})`).join("\n");
+  if (!await confirmWithLock(`Restore ${items.length} app${items.length > 1 ? "s" : ""}?`,
+    `${list}\n\nEach app is installed from the backup and its Android/data and Android/obb files are put back, replacing what is on the phone now.`, "Restore")) return;
+  await runButton(btn, async (set) => {
+    let failed = 0;
+    for (const [n, it] of items.entries()) {
+      const tag = items.length > 1 ? `${n + 1}/${items.length} ` : "";
+      try {
+        const parts = [];
+        for (const name of it.info.apks) parts.push({ name, blob: await it.zip.blob(name) });
+        const obbs = [];
+        for (const f of it.info.files) obbs.push({ name: f.path, blob: await it.zip.blob("files/" + f.path) });
+        await installItem({ parts, obbs }, (t) => set(`${tag}${it.info.name}: ${t}`));
+        if (it.info.androidBackup > 1024) {
+          set(`${tag}${it.info.name}: confirm the restore on the phone`);
+          const proc = await adb.subprocess.noneProtocol.spawn("bu restore");
+          await (await it.zip.blob("android-backup.ab")).stream().pipeTo(proc.stdin);
+          await proc.exited;
+        }
+        log(`Restored ${it.info.name} ${it.info.version}`);
+      } catch (e) { failed++; log(`FAILED ${it.info.name}: ${e.message}`); }
+    }
+    appsLoaded = false;
+    if (failed) return `⚠ ${failed} failed`;
+  });
+}
+
 // ---------- tabs and wiring ----------
 let tab = "apps";
 const TAB_LOAD = { apps: () => appsLoaded || loadApps(), battery: refreshStatus, settings: renderSettings,
-  permissions: renderPermissions, radios: renderRadios, storage: renderStorage, install: async () => renderInstall(), cleanup: () => { renderCleanup(); } };
+  permissions: renderPermissions, radios: renderRadios, storage: async () => { if (lockGate("storage", "Storage is locked", "Type the phone's PIN, password or pattern to see apps and files.")) await renderStorage(); },
+  install: async () => renderInstall(),
+  cleanup: () => { if (lockGate("cleanup", "Cleanup is locked", "Type the phone's PIN, password or pattern to see contacts, messages and the other data.")) renderCleanup(); } };
 function showTab(name) {
+  if (name !== tab) gateOpen = null;
   tab = name;
   document.querySelectorAll("[data-tab]").forEach((t) => t.setAttribute("aria-selected", t.dataset.tab === name));
   for (const n of Object.keys(TAB_LOAD)) $("#tab-" + n).classList.toggle("hidden", !adb || n !== name);
@@ -2242,7 +2425,7 @@ async function connect() {
   }
   adb = new Adb(transport);
   serial = device.serial;
-  transport.disconnected.then(() => { if (adb) { adb = null; appsLoaded = false; namesRun++; setConnected(""); toast("Phone disconnected."); } });
+  transport.disconnected.then(() => { if (adb) { adb = null; appsLoaded = false; gateOpen = null; namesRun++; setConnected(""); toast("Phone disconnected."); } });
   // "A065 | Nothing Phone (2)": model number, then the name the phone uses for itself.
   const model = (await sh("getprop ro.product.model")).trim();
   const names = (await sh("getprop ro.product.marketname; getprop ro.product.vendor.marketname; settings get global device_name; getprop ro.product.brand"))
@@ -2269,7 +2452,7 @@ const tryConnect = async () => {
 };
 $("#connectBtn").onclick = tryConnect;
 $("#connectBig").onclick = tryConnect;
-$("#disconnectBtn").onclick = async () => { const a = adb; adb = null; appsLoaded = false; namesRun++; setConnected(""); await a?.close().catch(() => {}); };
+$("#disconnectBtn").onclick = async () => { const a = adb; adb = null; appsLoaded = false; gateOpen = null; namesRun++; setConnected(""); await a?.close().catch(() => {}); };
 showTab("apps");
 
 loadTables().catch((e) => log("Could not load the app table, so preinstalled apps are hidden: " + e.message));

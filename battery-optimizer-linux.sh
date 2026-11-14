@@ -71,7 +71,13 @@ phonehelp() {
                trash, SD card, all files, contacts, calendar, call log, SMS,
                apps, app data or settings. Then delete single items or use
                DELETE ALL. Files are overwritten before removal and skip the
-               trash. Settings are sorted by type (Settings > Wi-Fi >
+               trash. Files and apps are listed biggest first, with sizes.
+               Opening Cleanup and every delete ask for the phone's screen
+               lock. Back up apps saves each app as a .zip in ~/phone-backups
+               (the app, its Android/data and Android/obb files, optionally
+               Android's own backup); Restore backups puts them back. Logins
+               usually do not survive: without root, private data stays on
+               the phone. Settings are sorted by type (Settings > Wi-Fi >
                DELETE ALL) and go back to their defaults.
                Flush free space sends TRIM, so the flash chip erases blocks
                freed by deleted files. Existing files are not touched.
@@ -420,7 +426,9 @@ case "$mode" in
       all=$(comm -12 <(echo "$all") <(echo "$boot"))
     fi
     declare -A USER TIER NAME
-    for p in $(adb shell pm list packages -3 | tr -d '\r' | sed 's/^package://'); do USER[$p]=1; done
+    # installed by the user: "-3", plus every package that is not a system package (some phones leave apps out of "-3")
+    sys_pkgs=$(adb shell pm list packages -s | tr -d '\r' | sed 's/^package://' | sort)
+    for p in $(adb shell pm list packages -3 | tr -d '\r' | sed 's/^package://') $(comm -23 <(echo "$all") <(echo "$sys_pkgs")); do USER[$p]=1; done
     while read -r t p n; do TIER[$p]=$t; NAME[$p]=$n; done < <(tiers)
     full="$all"
     for op in $OPS; do
@@ -660,10 +668,16 @@ def sd_cards():
 
 # List every file on internal storage and SD cards whose path matches the category regex.
 def load_files(pattern):
+    """Matching files on internal storage and SD cards, biggest first, with their size."""
     roots = " ".join(shlex.quote(root) for root in ["/sdcard/"] + sd_cards())
-    _, out, _ = adb(f"find {roots} -type f -print0 2>/dev/null")
-    paths = sorted(p for p in out.split("\0") if p and matches_category(pattern, p))
-    return [(p, re.sub(r"^/sdcard/+", "", p)) for p in paths]
+    _, out, _ = adb(f"find {roots} -type f -exec stat -c '%s %n' {{}} + 2>/dev/null")
+    found = []
+    for line in out.splitlines():
+        size, _, path = line.partition(" ")
+        if size.isdigit() and path and matches_category(pattern, path):
+            found.append((int(size), path))
+    found.sort(key=lambda f: (-f[0], f[1]))
+    return [(path, f"{fmt_size(size):>8}  {re.sub(r'^/sdcard/+', '', path)}") for size, path in found]
 
 
 # Prints "<index> <status>" per file: 0 done, 1 still there, 3 removed but not overwritten first.
@@ -778,10 +792,45 @@ def delete_content_many(uri, ids, live, progress):
 # --- apps ---
 
 # Installed packages. "-3" = apps you installed, "-s" = preinstalled system apps.
+def user_packages(flags=""):
+    """Apps installed by the user: "-3", plus every package that is not a system package,
+    because some phones leave user-installed apps out of "-3"."""
+    user = package_names(adb(f"pm list packages -3 {flags}")[1])
+    return user | (package_names(adb(f"pm list packages {flags}")[1]) - package_names(adb(f"pm list packages -s {flags}")[1]))
+
+
+def fmt_size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1000:
+            return f"{n:.0f} {unit}" if unit == "B" or n >= 100 else f"{n:.1f} {unit}"
+        n /= 1000
+    return f"{n:.1f} TB"
+
+
+def app_sizes():
+    """{package: app + data + cache bytes} from Android's last storage check ("dumpsys diskstats")."""
+    out = adb("dumpsys diskstats")[1]
+
+    def arr(key):
+        m = re.search(rf"^{key}: (\[.*\])", out, re.M)
+        try:
+            return json.loads(m[1]) if m else []
+        except ValueError:
+            return []
+    sizes = zip(arr("App Sizes"), arr("App Data Sizes"), arr("Cache Sizes"))
+    return {p: sum(x or 0 for x in s) for p, s in zip(arr("Package Names"), sizes)}
+
+
 def load_apps(scope="-3"):
-    _, out, _ = adb(f"pm list packages {scope}")
-    packages = sorted(line[8:] for line in out.splitlines() if line.startswith("package:"))
-    return [(p, p) for p in packages]
+    """Apps you installed, biggest first, with name and size. Other scopes ("-s") just list package names."""
+    if scope != "-3":
+        _, out, _ = adb(f"pm list packages {scope}")
+        return [(p, p) for p in sorted(line[8:] for line in out.splitlines() if line.startswith("package:"))]
+    packages, sizes = user_packages(), app_sizes()
+    apks = parse_package_paths(adb("pm list packages -f")[1])
+    labels = load_labels({p: apks[p] for p in packages if p in apks})
+    order = sorted(packages, key=lambda p: (-sizes.get(p, 0), p))
+    return [(p, f"{fmt_size(sizes[p]) if p in sizes else '':>8}  {labels.get(p) or p} ({p})") for p in order]
 
 
 # Uninstall one app. Returns True on success.
@@ -1017,6 +1066,27 @@ def lock_menu():
         print("Wrong entries count as failed unlock attempts, so stop and check before trying again.")
 
 
+# --- screen lock check ---
+
+def verify_lock(why):
+    """Ask for the phone's screen lock (hidden) and let the phone check it. True when it is right.
+    The phone's answer can repeat the code, so it is never printed."""
+    while True:
+        try:
+            code = getpass.getpass(f"{why} Screen lock (hidden; a pattern as digits 1-9; just Enter if the phone has none; Ctrl-C cancels): ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            return False
+        _, out, err = adb(f"locksettings verify --old {shlex.quote(code)}" if code else "locksettings verify")
+        if re.search("verified successfully", out + err, re.I):
+            return True
+        if re.search(r"unknown command|usage:", out + err, re.I) and not re.search("didn't match|wrong", out + err, re.I):
+            print("This phone does not let USB debugging check the screen lock.")
+            return False
+        print("Too many wrong tries: the phone makes you wait. Try again later." if re.search("throttl|try again", out + err, re.I)
+              else "Wrong screen lock. Wrong tries count as failed unlock attempts on the phone.")
+
+
 # --- disable apps and services ---
 
 # Set of package names from 'pm list packages' output.
@@ -1175,7 +1245,7 @@ def disable_menu():
     print("Services are background packages with no icon: Android blocks disabling parts of a package over USB.")
     print("Order: your apps, safe preinstalled extras, then system parts that are not recommended.")
     print("Critical system packages are hidden. CUSTOM still reaches them by package name.")
-    user = package_names(adb("pm list packages -3 -u")[1])
+    user = user_packages("-u")
     tiers = load_tiers()
     if not tiers:
         print("Could not load the app groups, so only your own apps are listed.")
@@ -1396,7 +1466,7 @@ def permissions_menu():
         print("Could not read the app list.")
         return
     labels = load_labels(apks)
-    user = package_names(adb("pm list packages -3")[1])
+    user = user_packages()
     tiers = load_tiers()
 
     def tier(p):
@@ -1569,7 +1639,7 @@ def choose_exceptions():
     # Preinstalled apps with an icon count too: they also get closed, and users think of them as apps.
     apps_with_icon = parse_launcher_packages(adb("cmd package query-activities --brief -a android.intent.action.MAIN "
                                                  "-c android.intent.category.LAUNCHER")[1])
-    choices = package_names(adb("pm list packages -3")[1]) | apps_with_icon
+    choices = user_packages() | apps_with_icon
     apks = {p: apk for p, apk in parse_package_paths(adb("pm list packages -f")[1]).items() if p in choices}
     labels = load_labels(apks)
     exceptions = load_exceptions()
@@ -1600,7 +1670,7 @@ def close_apps_menu():
         return
     before = available_mb()
     running = parse_running_packages(adb("ps -A -o NAME")[1])
-    third_party = package_names(adb("pm list packages -3")[1])
+    third_party = user_packages()
     keep = packages_to_keep() | exceptions
     # System processes only get am kill: Android refuses it for essential ones, and they restart if needed.
     targets = sorted(p for p in running if p not in keep and not PROTECTED_APPS.search(p))
@@ -1717,8 +1787,7 @@ def browse(title, load, delete, note="", allow_all=True, delete_many=None):
             return
         if allow_all and 0 in chosen:
             print(f"This permanently deletes all {len(items)} items in {title}.")
-            if ask("Type DELETE to confirm: ") != "DELETE":
-                print("Cancelled.")
+            if not verify_lock("To delete everything,"):
                 continue
             selected = items
         else:
@@ -1727,8 +1796,7 @@ def browse(title, load, delete, note="", allow_all=True, delete_many=None):
                 print(f"  {label}")
             if len(selected) > 5:
                 print(f"  ...and {len(selected) - 5} more")
-            if ask(f"Permanently delete {len(selected)}? [y/N] ").lower() != "y":
-                print("Cancelled.")
+            if not verify_lock(f"To permanently delete {len(selected)},"):
                 continue
         failed = delete_items(selected, delete, delete_many)
         gone = {item for item, _ in selected} - {item for item, _ in failed}
@@ -1750,9 +1818,127 @@ def settings_menu():
         browse(f"Settings > {name}", lambda: load_settings(name), delete_setting, note, name != SETTINGS_OTHER)
 
 
+# --- backup and restore: one .zip per app, the same format the website uses ---
+# The app (every split APK), its shared-storage data (Android/data, Android/obb) and optionally Android's own backup of
+# its private data. Apps can opt out of that, and logins tied to the phone's key store never move without root.
+
+BACKUP_DIR = os.path.expanduser("~/phone-backups")
+
+
+def safe_backup_path(path, package):
+    """Backups may only put files back into the app's own Android/data and Android/obb folders."""
+    return re.fullmatch(rf"Android/(data|obb)/{re.escape(package)}/[^\0]+", path or "") is not None and ".." not in path.split("/")
+
+
+def stream_to_zip(zf, name, command):
+    """Copy the output of a phone command into the zip without holding it in memory. Returns the size."""
+    proc = subprocess.Popen(["adb", "exec-out", command], stdout=subprocess.PIPE)
+    size = 0
+    with zf.open(name, "w", force_zip64=True) as f:
+        while chunk := proc.stdout.read(1 << 20):
+            f.write(chunk)
+            size += len(chunk)
+            print(f"\r  {name}: {fmt_size(size)}   ", end="", flush=True)
+    proc.wait()
+    print()
+    return size
+
+
+def backup_app(package, label, path, android_backup):
+    q = shlex.quote(package)
+    apks = [line[8:].strip() for line in adb(f"pm path {q}")[1].splitlines() if line.startswith("package:")]
+    if not apks:
+        raise PhoneError("not installed")
+    out = adb(f"find {shlex.quote('/sdcard/Android/data/' + package)} {shlex.quote('/sdcard/Android/obb/' + package)} "
+              "-type f -exec stat -c '%s %n' {} + 2>/dev/null")[1]
+    files = [(int(size), name) for size, _, name in (line.partition(" ") for line in out.splitlines()) if size.isdigit()]
+    version = re.search(r"versionName=(.*)", adb(f"dumpsys package {q} | grep -m1 versionName")[1])
+    info = {"format": 1, "package": package, "name": label, "version": version[1].strip() if version else "",
+            "phone": adb("getprop ro.product.model")[1].strip(), "created": datetime.now().isoformat(timespec="seconds"),
+            "apks": [], "files": [], "androidBackup": 0}
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:
+        for i, apk in enumerate(apks):
+            name = f"apk/{'base' if i == 0 else f'split{i}'}-{os.path.basename(apk)}"
+            stream_to_zip(zf, name, f"cat {shlex.quote(apk)}")
+            info["apks"].append(name)
+        for size, name in files:
+            rel = name[len("/sdcard/"):]
+            stream_to_zip(zf, "files/" + rel, f"cat {shlex.quote(name)}")
+            info["files"].append({"path": rel, "size": size})
+        if android_backup:
+            print("  Confirm the backup on the phone.")
+            info["androidBackup"] = stream_to_zip(zf, "android-backup.ab", f"bu backup -noapk -noobb -noshared {q}")
+        zf.writestr("backup.json", json.dumps(info, indent=1))
+    return info
+
+
+def backup_menu():
+    apps = load_apps()
+    chosen = pick("Back up", [label for _, label in apps], "Enter = back up | Tab = select several | Esc = back", multi=True)
+    if not chosen:
+        return
+    android_backup = ask("Also Android's own backup of private data? You confirm it on the phone; many apps opt out "
+                         "and logins usually do not transfer. [y/N] ").lower() == "y"
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
+    for i in chosen:
+        package, label = apps[i][0], re.sub(r"^\s*\S* ?\S*\s+", "", apps[i][1]).rsplit(" (", 1)[0]
+        path = os.path.join(BACKUP_DIR, f"{package}-{stamp}.zip")
+        print(f"Backing up {label}...")
+        try:
+            info = backup_app(package, label, path, android_backup)
+            print(f"  saved {path}: {len(info['apks'])} app part(s), {len(info['files'])} data files"
+                  + (f", Android backup {fmt_size(info['androidBackup'])}" + (" (empty: the app does not allow it)" if info["androidBackup"] < 1024 else "")
+                     if android_backup else ""))
+        except (OSError, PhoneError, subprocess.SubprocessError) as e:
+            print(f"  FAILED: {label}: {e}")
+            if os.path.exists(path):
+                os.remove(path)   # only the half-written backup this run just created
+
+
+def restore_backup(path):
+    with zipfile.ZipFile(path) as zf, tempfile.TemporaryDirectory() as tmp:
+        info = json.loads(zf.read("backup.json"))
+        package = info.get("package", "")
+        bad = [f["path"] for f in info.get("files", []) if not safe_backup_path(f.get("path"), package)]
+        if not valid_package_name(package) or bad:
+            raise PhoneError("this backup wants to write outside the app's own folders, so it is not restored")
+        apks = [zf.extract(name, tmp) for name in info["apks"]]
+        r = subprocess.run(["adb", "install", "-r", apks[0]] if len(apks) == 1 else ["adb", "install-multiple", "-r", *apks],
+                           capture_output=True, text=True, errors="replace")
+        if "Success" not in r.stdout + r.stderr:
+            raise PhoneError((r.stdout + r.stderr).strip().splitlines()[-1] if (r.stdout + r.stderr).strip() else "install failed")
+        for f in info["files"]:
+            local, remote = zf.extract("files/" + f["path"], tmp), "/sdcard/" + f["path"]
+            adb(f"mkdir -p {shlex.quote(os.path.dirname(remote))}")
+            subprocess.run(["adb", "push", local, remote], capture_output=True)
+            os.remove(local)   # a temp copy, so big game data does not pile up on this computer
+        if info.get("androidBackup", 0) > 1024:
+            print("  Confirm the restore on the phone.")
+            subprocess.run(["adb", "restore", zf.extract("android-backup.ab", tmp)])
+    return info
+
+
+def restore_menu():
+    zips = sorted((f for f in os.listdir(BACKUP_DIR) if f.endswith(".zip")), reverse=True) if os.path.isdir(BACKUP_DIR) else []
+    if not zips:
+        print(f"No backups in {BACKUP_DIR}. Backups from the website can be copied there too.")
+        return
+    chosen = pick("Restore", zips, "Enter = restore | Tab = select several | Esc = back", multi=True)
+    if not chosen or not verify_lock("To restore (this replaces the app and its data on the phone),"):
+        return
+    for i in chosen:
+        print(f"Restoring {zips[i]}...")
+        try:
+            info = restore_backup(os.path.join(BACKUP_DIR, zips[i]))
+            print(f"  restored: {info.get('name') or info['package']} {info.get('version', '')}")
+        except (OSError, PhoneError, ValueError, KeyError, zipfile.BadZipFile) as e:
+            print(f"  FAILED: {zips[i]}: {e}")
+
+
 # Top-level Cleanup menu.
 def main_menu():
-    names = list(FILE_CATEGORIES) + list(CONTENT_CATEGORIES) + [
+    names = list(FILE_CATEGORIES) + list(CONTENT_CATEGORIES) + ["Back up apps", "Restore backups"] + [
         "Apps", "App data", "System app data (no delete all)", "Settings", "Keyboard learned words", "Screen lock & fingerprints",
         "Disable apps & services", "Close apps & free RAM", "Notifications", "Flush free space"]
     while True:
@@ -1762,6 +1948,10 @@ def main_menu():
         name = names[chosen[0]]
         if name == "Settings":
             settings_menu()
+        elif name == "Back up apps":
+            backup_menu()
+        elif name == "Restore backups":
+            restore_menu()
         elif name == "Apps":
             browse("Apps", load_apps, delete_app)
         elif name == "App data":
@@ -1990,7 +2180,7 @@ def restricted_now():
 def battery_targets(keep):
     """Your apps and the safe preinstalled extras, minus the keep list and whatever the phone needs to work."""
     installed = package_names(adb("pm list packages")[1])
-    user = package_names(adb("pm list packages -3")[1])
+    user = user_packages()
     tiers = load_tiers()
     protect = essential_packages() | keep | ALWAYS_KEEP
     targets = sorted(p for p in installed if (p in user or tiers.get(p, (4, ""))[0] == 2)
@@ -2068,7 +2258,7 @@ def choose_keep():
     """Pick the apps that must keep working. Returns the saved set, or None on Esc before saving."""
     apps_with_icon = parse_launcher_packages(adb("cmd package query-activities --brief -a android.intent.action.MAIN "
                                                  "-c android.intent.category.LAUNCHER")[1])
-    choices = package_names(adb("pm list packages -3")[1]) | apps_with_icon
+    choices = user_packages() | apps_with_icon
     apks = {p: apk for p, apk in parse_package_paths(adb("pm list packages -f")[1]).items() if p in choices}
     labels = load_labels(apks)
     saved = load_keep()
@@ -2101,7 +2291,7 @@ def need_keep():
 def data_per_app_menu(backup):
     print("Loading apps...")
     apks = parse_package_paths(adb("pm list packages -f")[1])
-    user = package_names(adb("pm list packages -3")[1])
+    user = user_packages()
     tiers = load_tiers()
     shown = {p: apk for p, apk in apks.items() if p in user or tiers.get(p, (4, ""))[0] == 2}
     labels = load_labels(shown)
@@ -2403,6 +2593,10 @@ def self_check():
     assert pick_version(versions, 34, ["arm64-v8a"], suggested=30)["versionCode"] == "30"
     assert pick_version(versions, 33, ["arm64-v8a"])["versionCode"] == "40"
     assert pick_version([{"versionCode": "5", "minSdkVersion": "40"}], 33, ["arm64-v8a"]) is None
+    assert safe_backup_path("Android/obb/com.a/main.obb", "com.a") and safe_backup_path("Android/data/com.a/f/x.db", "com.a")
+    assert not safe_backup_path("Android/data/com.b/x", "com.a") and not safe_backup_path("Android/data/com.a/../../DCIM/x", "com.a")
+    assert not safe_backup_path("DCIM/x.jpg", "com.a") and not safe_backup_path(None, "com.a")
+    assert fmt_size(999) == "999 B" and fmt_size(1500) == "1.5 KB" and fmt_size(250_000_000) == "250 MB"
     print("self-check ok")
 
 
@@ -2513,7 +2707,7 @@ def main():
             permissions_menu()
         elif sys.argv[1:] == ["--store"]:
             store_menu()
-        else:
+        elif verify_lock("Cleanup is locked."):
             main_menu()
     except KeyboardInterrupt:
         print("\nStopped.")
