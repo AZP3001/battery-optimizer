@@ -1,0 +1,26 @@
+# Refreshes web/fdroid.json (the website's searchable copy of F-Droid's app list) once a day.
+name: F-Droid app list
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+  pages: write
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 .github/scripts/fdroid_index.py web/fdroid.json
+      - name: Commit if changed
+        run: |
+          git diff --quiet web/fdroid.json && { echo "No change."; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update F-Droid app list" web/fdroid.json
+          git push
+          # pushes made with the workflow token may not start a Pages build, so ask for one
+          gh api -X POST "repos/$GITHUB_REPOSITORY/pages/builds" || true
+        env:
+          GH_TOKEN: ${{ github.token }}

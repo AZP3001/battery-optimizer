@@ -308,7 +308,11 @@
 
   <!-- Install: .apk files and split bundles from this computer -->
   <section id="tab-install" class="hidden">
-    <h1>Install apps</h1>
+    <h1>Get apps from F-Droid</h1>
+    <p class="lead">Search open-source apps. Install downloads the app in this browser, checks it against F-Droid's checksum and installs it over USB.</p>
+    <input type="search" class="search" id="storeSearch" placeholder="Search F-Droid apps" style="width:100%;margin-bottom:12px">
+    <div class="list" id="storeList" style="margin-bottom:32px"></div>
+    <h1>Install files</h1>
     <p class="lead">Add .apk files or split bundles (.apks, .xapk, .apkm). Each one shows its name, version and what is already on the phone. Nothing is installed until you press Install.</p>
     <label class="drop" id="drop"><input type="file" id="installFiles" multiple accept=".apk,.apks,.xapk,.apkm" hidden>
       <b>Drop files here</b><span class="muted">or click to choose</span></label>
@@ -327,7 +331,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.3</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.4</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -888,6 +892,7 @@ async function loadApps({ keepSide = false } = {}) {
   selected = new Set([...selected].filter((p) => still.has(p)));
   const first = !appsLoaded;
   appsLoaded = true;
+  if (first) log(`Apps: ${all.length} packages on the phone, ${user.size} installed by you, ${APPS.filter((a) => a.tier === 4).length} hidden system parts.`);
   renderApps(); if (!keepSide) renderSide(); renderKeepInfo();
   if (first) loadNamesAndIcons().catch(showError);
 }
@@ -1492,6 +1497,13 @@ let storageView = "apps", fileCat = 0, STORAGE = null, FILES = null, storageSel 
 async function renderStorage() {
   await loadApps({ keepSide: true });
   STORAGE = parseDiskstats(await sh("dumpsys diskstats"));
+  // Apps missing from Android's last storage check: at least their app size, read from their APK files.
+  const measured = new Set(STORAGE.apps.map((x) => x.p));
+  const missing = APPS.filter((a) => (a.tier < 4 || a.optimized || a.off) && !measured.has(a.p)).map((a) => a.p);
+  for (const group of chunk(missing, 40)) {
+    const out = await sh(`for p in ${group.map(q).join(" ")}; do s=0; for f in $(pm path "$p" | sed 's/^package://'); do s=$((s + $(stat -c %s "$f"))); done; echo "$p $s"; done`);
+    for (const m of out.matchAll(/^(\S+) (\d+)$/gm)) STORAGE.apps.push({ p: m[1], app: Number(m[2]), data: null, cache: null });
+  }
   renderStorageSummary();
   if (storageView === "files" && !FOLDERS) await loadFolders();
   renderStorageList();
@@ -1499,18 +1511,20 @@ async function renderStorage() {
 function renderStorageSummary() {
   const box = $("#storageSummary"), s = STORAGE;
   if (!s.total) { box.replaceChildren(el("p", "muted", "This phone did not report its storage use.")); return; }
-  const used = s.total - s.free;
+  // Settings shows the chip size rounded up to a power of two (e.g. 256 GB) and counts the system partition as used,
+  // while Android reports only the data partition (e.g. 242 GB), so the page counts the same way as Settings.
+  const total = 2 ** Math.ceil(Math.log2(s.total / 1e9)) * 1e9, used = total - s.free;
   const bar = el("div", "usage");
   const colors = ["#2f81f7", "#a371f7", "#3fb950", "#db6d28", "#d29922", "#39c5cf", "#8b949e", "#6e7681"];
   const legend = el("div", "legend");
   s.kinds.forEach(([name, v], i) => {
-    const part = el("span"); part.style.cssText = `width:${(v / s.total) * 100}%;background:${colors[i]}`; part.title = `${name}: ${fmtBytes(v)}`;
+    const part = el("span"); part.style.cssText = `width:${(v / total) * 100}%;background:${colors[i]}`; part.title = `${name}: ${fmtBytes(v)}`;
     bar.append(part);
     const l = el("span"); const dot = el("i"); dot.style.background = colors[i];
     l.append(dot, `${name} ${fmtBytes(v)}`); legend.append(l);
   });
   const head = el("div", "row"); head.style.justifyContent = "space-between";
-  head.append(el("h2", "", `${fmtBytes(used)} used of ${fmtBytes(s.total)}`), el("span", "muted", `${fmtBytes(s.free)} free`));
+  head.append(el("h2", "", `${fmtBytes(used)} used of ${fmtBytes(total)}`), el("span", "muted", `${fmtBytes(s.free)} free`));
   box.replaceChildren(head, bar, legend, el("p", "muted small", "Sizes per kind and per app are from Android's last storage check, so they can be a little out of date."));
 }
 
@@ -1591,7 +1605,8 @@ function renderStorageList() {
     const row = el("div", "app" + (storageSel.has(key(x)) ? " sel" : ""));
     const info = el("div", "info"), size = el("div", "size", fmtBytes(x.size));
     if (storageView === "apps") {
-      info.append(el("div", "name", x.a.name), el("div", "pkg", `App ${fmtBytes(x.app)} · Data ${fmtBytes(x.data)} · Cache ${fmtBytes(x.cache)}`));
+      info.append(el("div", "name", x.a.name), el("div", "pkg", x.data === null ? `App ${fmtBytes(x.app)} · data not measured by Android yet`
+        : `App ${fmtBytes(x.app)} · Data ${fmtBytes(x.data)} · Cache ${fmtBytes(x.cache)}`));
       row.append(el("div", "tick"), iconEl(x.a), info, ...(x.a.tier > 1 ? [el("span", "badge", x.a.tier === 4 ? "System" : "Preinstalled")] : []), size);
     } else {
       const slash = x.path.lastIndexOf("/");
@@ -2333,11 +2348,100 @@ async function restoreBackups(btn, files) {
   });
 }
 
+// ---------- F-Droid in the Install tab ----------
+// Search runs on fdroid.json, a daily copy of F-Droid's app list kept next to this page (f-droid.org itself may not be
+// read by web pages). The browser downloads the APK normally; the page picks it up from the Downloads folder (allowed
+// once), checks it against F-Droid's SHA-256 and installs it over USB. The Play Store app is not used.
+const FDROID_REPO = "https://f-droid.org/repo";
+let STORE = null, storeDevice = null;
+async function loadStore() {
+  if (STORE) return;
+  const r = await fetch("fdroid.json", { cache: "no-cache" });
+  if (!r.ok) throw new Error("the F-Droid list is not available right now");
+  STORE = await r.json();
+  const [sdk, abis] = (await sh("getprop ro.build.version.sdk; getprop ro.product.cpu.abilist")).trim().split("\n");
+  storeDevice = { sdk: parseInt(sdk, 10) || 0, abis: (abis || "").split(",").filter(Boolean) };
+}
+// Newest version that runs on this phone: Android version and processor type. [versionName, code, minSdk, maxSdk, abis, apk, sha256, size]
+function pickStoreVersion(versions, sdk, abis) {
+  return versions.find(([, , min, max, nc]) => min <= sdk && (!max || sdk <= max) && (!nc || nc.split(",").some((a) => abis.includes(a)))) || null;
+}
+function renderStore() {
+  const box = $("#storeList"), s = $("#storeSearch").value.trim().toLowerCase();
+  if (!STORE) { box.replaceChildren(el("div", "empty", "Loading the F-Droid list...")); return; }
+  if (s.length < 2) { box.replaceChildren(el("div", "empty", `Search ${STORE.length} open-source apps from F-Droid.`)); return; }
+  const installed = new Set(APPS.map((a) => a.p));
+  const hits = STORE.filter(([p, n, sum]) => n.toLowerCase().includes(s) || p.includes(s) || sum.toLowerCase().includes(s))
+    .sort((a, b) => (b[1].toLowerCase().startsWith(s) - a[1].toLowerCase().startsWith(s)) || a[1].localeCompare(b[1])).slice(0, 40);
+  if (!hits.length) { box.replaceChildren(el("div", "empty", "Nothing found.")); return; }
+  box.replaceChildren(...hits.map(([p, name, summary, icon, versions]) => {
+    const row = el("div", "app"), info = el("div", "info"), v = pickStoreVersion(versions, storeDevice.sdk, storeDevice.abis);
+    row.style.cursor = "default";
+    const img = el("img", "icon"); img.alt = ""; img.width = img.height = 36; img.loading = "lazy";
+    img.src = icon ? FDROID_REPO + icon : ""; img.onerror = () => img.replaceWith(iconEl({ p, name, icon: "" }));
+    info.append(el("div", "name", name), el("div", "pkg", [summary, v && `v${v[0]}`, v && fmtBytes(v[7])].filter(Boolean).join(" · ")));
+    const btn = el("button", "btn " + (installed.has(p) ? "" : "primary"), !v ? "Not for this phone" : installed.has(p) ? "Update" : "Install");
+    btn.disabled = !v;
+    btn.onclick = () => storeInstall(btn, p, name, v);
+    row.append(img, info, ...(installed.has(p) ? [el("span", "badge green", "Installed")] : []), btn);
+    return row;
+  }));
+}
+
+// The Downloads folder, allowed once and remembered by the browser.
+async function downloadsFolder() {
+  let dir = await cache.get("__downloads_folder");
+  if (dir && (await dir.queryPermission({ mode: "read" })) !== "granted" && (await dir.requestPermission({ mode: "read" })) !== "granted") dir = null;
+  if (dir) return dir;
+  if (await modal("Allow your Downloads folder", "The browser downloads the app into your Downloads folder. Choose that folder once so this page can pick the file up from there and install it. It only reads .apk files it is waiting for.",
+    [["Cancel", ""], ["Choose Downloads folder", "ok", "primary"]]) !== "ok") return null;
+  try { dir = await window.showDirectoryPicker({ id: "downloads", startIn: "downloads", mode: "read" }); } catch { return null; }
+  await cache.set("__downloads_folder", dir);
+  return dir;
+}
+const sha256 = async (blob) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()))].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+async function storeInstall(btn, pkg, name, v) {
+  if (!window.showDirectoryPicker) { await modal("Not supported", "Installing from F-Droid needs Chrome or Edge on a computer.", [["OK", "ok", "primary"]]); return; }
+  const dir = await downloadsFolder();
+  if (!dir) return;
+  const [versionName, , , , , apk, hash, size] = v;
+  const base = apk.split("/").pop().replace(/\.apk$/i, "");
+  // Start the normal browser download (the browser may ask to keep an .apk file). A hidden frame, not a link:
+  // if the browser shows the response instead of downloading it, only the frame changes, never this page.
+  const frame = el("iframe"); frame.hidden = true; frame.src = FDROID_REPO + apk; document.body.append(frame);
+  setTimeout(() => frame.remove(), 10 * 60 * 1000);
+  await runButton(btn, async (set) => {
+    const started = Date.now();
+    let file = null;
+    // Wait for the finished download: same name (the browser may add " (1)"), right size, right checksum.
+    while (!file) {
+      if (Date.now() - started > 10 * 60 * 1000) throw new Error("the download did not show up in the chosen folder within 10 minutes");
+      set(`Downloading ${name}... (keep the file if the browser asks)`);
+      for await (const entry of dir.values()) {
+        if (entry.kind !== "file" || !entry.name.startsWith(base) || !entry.name.endsWith(".apk")) continue;
+        const f = await entry.getFile();
+        if (f.size !== size) continue;
+        set("Checking the download...");
+        if (await sha256(f) === hash) { file = f; break; }
+      }
+      if (!file) await new Promise((r) => setTimeout(r, 1500));
+    }
+    await installItem({ parts: [{ name: "base.apk", blob: file }], obbs: [] }, set);
+    log(`Installed ${name} ${versionName} from F-Droid (checksum verified)`);
+    await loadApps({ keepSide: true });
+    // Only this row changes, so the button keeps its "Done".
+    btn.dataset.label = "Update";
+    const row = btn.closest(".app");
+    if (!row.querySelector(".badge")) btn.before(el("span", "badge green", "Installed"));
+  });
+}
+
 // ---------- tabs and wiring ----------
 let tab = "apps";
 const TAB_LOAD = { apps: () => appsLoaded || loadApps(), battery: refreshStatus, settings: renderSettings,
   permissions: renderPermissions, radios: renderRadios, storage: async () => { if (lockGate("storage", "Storage is locked", "Type the phone's PIN, password or pattern to see apps and files.")) await renderStorage(); },
-  install: async () => renderInstall(),
+  install: async () => { renderInstall(); renderStore(); await loadStore(); renderStore(); },
   cleanup: () => { if (lockGate("cleanup", "Cleanup is locked", "Type the phone's PIN, password or pattern to see contacts, messages and the other data.")) renderCleanup(); } };
 function showTab(name) {
   if (name !== tab) gateOpen = null;
@@ -2367,6 +2471,7 @@ drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); addIns
 $("#installFiles").onchange = (e) => { addInstallFiles([...e.target.files]).catch(showError); e.target.value = ""; };
 $("#installClear").onclick = () => { INSTALL = []; renderInstall(); };
 $("#installGo").onclick = () => installAll($("#installGo"));
+$("#storeSearch").oninput = () => STORE && renderStore();
 $("#showAllSystem").checked = showAllSystem;
 $("#showAllSystem").onchange = (e) => { showAllSystem = e.target.checked; saveJson("phone-show-all-system", showAllSystem); renderApps(); };
 $("#storageSearch").oninput = () => STORAGE && renderStorageList();
