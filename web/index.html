@@ -193,7 +193,7 @@
       <button role="tab" data-tab="permissions">Permissions</button>
       <button role="tab" data-tab="radios">Radios</button>
       <button role="tab" data-tab="storage">Storage</button>
-      <button role="tab" data-tab="tools">Tools</button>
+      <button role="tab" data-tab="cleanup">Cleanup</button>
     </nav>
     <div class="phone"><span class="dot" id="dot"></span><span id="phoneName" class="muted">Not connected</span>
       <button class="btn" id="connectBtn">Connect</button><button class="btn hidden" id="disconnectBtn">Disconnect</button></div>
@@ -212,7 +212,7 @@
     </ol>
     <div><button class="btn primary big" id="connectBig">Connect phone</button></div>
     <p class="muted small" style="margin-top:20px">Needs Chrome or Edge on a computer. Close other ADB programs first (<code>adb kill-server</code>).
-      On Windows the phone may need its USB driver.<br>This website is experimental. The <a href="https://github.com/AZP3001/battery-optimizer">scripts</a> are recommended for now.</p>
+      On Windows the phone may need its USB driver.</p>
   </section>
 
   <!-- Apps: click apps (or a section's box) to select; the panel on the right sets settings for all selected apps -->
@@ -296,20 +296,12 @@
     <div class="applybar" id="storageBar"></div>
   </section>
 
-  <!-- Tools from the script's cleanup menu that are safe in a browser -->
-  <section id="tab-tools" class="hidden">
-    <div class="cards">
-      <div class="card"><h2>Close apps &amp; free RAM</h2><p class="muted">Closes background apps and services. Keeps the ones you would notice: home screen, keyboard, calls, SMS, music and other foreground services.</p>
-        <button class="btn" data-act="ram">Free RAM</button><div class="result" id="res-ram"></div></div>
-      <div class="card"><h2>Flush free space</h2><p class="muted">Sends TRIM so the storage chip erases blocks freed by deleted files. Existing files are not touched.</p>
-        <button class="btn" data-act="trim">Flush free space</button><div class="result" id="res-trim"></div></div>
-      <div class="card"><h2>Install an app</h2><p class="muted">Install an .apk file from this computer. Updates the app if it is already installed and keeps its data.</p>
-        <input type="file" id="apkFile" accept=".apk"><div class="row" style="margin-top:12px"><button class="btn" data-act="install">Install</button></div>
-        <div class="result" id="res-install"></div></div>
-      <div class="card"><h2>App names &amp; icons</h2><p class="muted">Names and icons are read from each app once and remembered in this browser. Clear them to read them again.</p>
-        <button class="btn" data-act="clearNames">Read names again</button><div class="result" id="res-clearNames"></div></div>
+  <!-- Cleanup: everything from the script's cleanup tool. Deletes ask for the phone's screen lock. -->
+  <section id="tab-cleanup" class="hidden">
+    <div class="perm-layout">
+      <div class="list perm-list" id="cleanNav"></div>
+      <div id="cleanPane"></div>
     </div>
-    <p class="muted small" style="margin-top:16px">Files and apps can be deleted in the Storage tab. Deleting contacts, messages and settings stays in the scripts' Cleanup tool for now.</p>
   </section>
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
@@ -403,8 +395,8 @@ const DOZE_CONSTANTS = { light_after_inactive_to: "10000", inactive_to: "30000",
   locating_to: "0", motion_inactive_to: "0", idle_after_inactive_to: "0" };
 // START_FOREGROUND is left alone on purpose: denying it makes some apps crash and restart in a loop.
 const RESTRICT_OPS = ["RUN_ANY_IN_BACKGROUND", "RUN_IN_BACKGROUND", "WAKE_LOCK"];
-// Optimize also blocks foreground services, like the script's optimize tool.
-const OPTIMIZE_OPS = ["RUN_IN_BACKGROUND", "RUN_ANY_IN_BACKGROUND", "WAKE_LOCK", "START_FOREGROUND"];
+// "Optimized" = what the Apps tab's Optimize preset sets. Foreground services are left alone, as in the Battery tool.
+const OPTIMIZE_OPS = ["RUN_IN_BACKGROUND", "RUN_ANY_IN_BACKGROUND", "WAKE_LOCK"];
 const RADIOS = [  // [name, state command, on, off]
   ["Wi-Fi", "settings get global wifi_on", "svc wifi enable", "svc wifi disable"],
   ["Mobile data", "settings get global mobile_data", "svc data enable", "svc data disable"],
@@ -832,7 +824,6 @@ const CONTROLS = [
   // debugging may not switch off single boot receivers, so this one app-op is the switch. Only apps that start at boot get it.
   { key: "boot", label: "Start at boot", help: "Blocking also stops background running (same Android switch)", ops: ["RUN_ANY_IN_BACKGROUND"], bootOnly: true },
   { key: "wake", label: "Keep the phone awake", help: "Wake locks", ops: ["WAKE_LOCK"] },
-  { key: "fg", label: "Foreground services", help: "Off can make some apps crash", ops: ["START_FOREGROUND"] },
   { key: "data", label: "Background mobile data", help: "Wi-Fi is not affected" },
   { key: "notif", label: "Notifications", help: "" },
 ];
@@ -956,10 +947,10 @@ function renderSide() {
   const preset = (label, title, f) => { const b = el("button", "btn", label); b.title = title; b.onclick = f; return b; };
   const presets = el("div", "presets");
   presets.append(
-    preset("Optimize", "Block background, wake locks and foreground services, Restricted bucket, close them",
-      () => { ["bg", "boot", "wake", "fg"].forEach((k) => segs[k].set("block")); bucket.value = "restricted"; stop.checked = true; }),
+    preset("Optimize", "Block background, start at boot and wake locks, Restricted bucket, close them",
+      () => { ["bg", "boot", "wake"].forEach((k) => segs[k].set("block")); bucket.value = "restricted"; stop.checked = true; }),
     preset("Unoptimize", "Allow everything again, Active bucket",
-      () => { ["bg", "boot", "wake", "fg"].forEach((k) => segs[k].set("allow")); bucket.value = "active"; stop.checked = false; }),
+      () => { ["bg", "boot", "wake"].forEach((k) => segs[k].set("allow")); bucket.value = "active"; stop.checked = false; }),
     preset("Reset", "Back to No change", () => renderSide()));
   const apply = el("button", "btn primary big", `Apply to ${n} app${n > 1 ? "s" : ""}`);
   apply.style.cssText = "width:100%;margin-top:16px";
@@ -977,7 +968,7 @@ function renderSide() {
     settingRow("App", "Disabled apps disappear until enabled again", appSeg), stopLabel, apply, clear);
 }
 
-// Shell commands for one app. want: {bg,wake,fg,data,notif: ""|"allow"|"block", bucket, app: ""|"enable"|"disable", stop}
+// Shell commands for one app. want: {bg,boot,wake,data,notif: ""|"allow"|"block", bucket, app: ""|"enable"|"disable", stop}
 function commandsFor(a, want) {
   const p = q(a.p), cmds = [];
   for (const c of CONTROLS) {
@@ -1087,7 +1078,7 @@ async function appSettings(a) {
   const action = (label, cls, question, cmd) => {
     const b = el("button", "btn " + cls, label);
     b.onclick = async () => {
-      if (question && await modal(label + "?", question, [["Cancel", ""], [label, "ok", "primary"]]) !== "ok") return;
+      if (question && !await confirmWithLock(label + "?", question, label)) return;
       runButton(b, async () => { log(`${label} ${a.p}: ${(await sh(cmd)).trim()}`); });
     };
     return b;
@@ -1397,16 +1388,20 @@ function parseForegroundPackages(text) {
 }
 const availableMb = async () => { const m = (await sh("cat /proc/meminfo")).match(/^MemAvailable:\s+(\d+) kB/m); return m ? Math.floor(m[1] / 1024) : null; };
 // Normal mode of the script's "Close apps & free RAM": background apps get "am kill", nothing is force-stopped.
-async function freeRam() {
+async function freeRam(hard) {
   const before = await availableMb();
   const running = new Set((await sh("ps -A -o NAME")).split("\n").filter((l) => l.includes(".")).map((l) => l.trim().split(":")[0]));
   const keep = new Set([...(await essentialPackages()), ...parseForegroundPackages(await sh("dumpsys activity services"))]);
+  if (hard) currentKeep().forEach((p) => keep.add(p));
   const targets = [...running].filter((p) => !keep.has(p) && !PROTECTED_APPS.test(p) && validPkg(p)).sort();
-  await runAll(targets.map((p) => `am kill ${q(p)}`));
+  const user = hard ? packageNames(await sh("pm list packages -3")) : new Set();
+  const stop = targets.filter((p) => user.has(p));
+  await runAll([...stop.map((p) => `am force-stop ${q(p)}`), ...targets.filter((p) => !user.has(p)).map((p) => `am kill ${q(p)}`)]);
   await sh("am kill-all");
   await new Promise((r) => setTimeout(r, 3000));  // let freed memory show up in the kernel's count
   const after = await availableMb();
-  log(`Asked ${targets.length} background apps to close. Kept ${[...running].filter((p) => keep.has(p)).length} you would notice.`);
+  if (hard) log(`Force-stopped ${stop.length} apps (keep list left alone).`);
+  log(`Asked ${targets.length - stop.length} background apps to close. Kept ${[...running].filter((p) => keep.has(p)).length} you would notice.`);
   if (before !== null && after !== null) log(`Free RAM: ${before} MB -> ${after} MB (${after - before >= 0 ? "+" : ""}${after - before} MB)`);
   log("Android restarts some services by itself, so a bit of this RAM gets used again.");
 }
@@ -1467,7 +1462,7 @@ async function renderStorage() {
   if (!appsLoaded) await loadApps();
   STORAGE = parseDiskstats(await sh("dumpsys diskstats"));
   renderStorageSummary();
-  if (storageView === "files" && !FILES) await loadFiles();
+  if (storageView === "files" && !FOLDERS) await loadFolders();
   renderStorageList();
 }
 function renderStorageSummary() {
@@ -1488,17 +1483,43 @@ function renderStorageSummary() {
   box.replaceChildren(head, bar, legend, el("p", "muted small", "Sizes per kind and per app are from Android's last storage check, so they can be a little out of date."));
 }
 
-async function loadFiles() {
-  $("#storageList").replaceChildren(el("div", "empty", "Looking through all files... (this can take a minute)"));
-  const cards = (await sh("ls /storage 2>/dev/null")).split(/\s+/).filter((n) => n && n !== "emulated" && n !== "self").map((n) => `/storage/${n}/`);
-  const roots = ["/sdcard/", ...cards].map(q).join(" ");
-  const out = await sh(`find ${roots} -type f -exec stat -c '%s %n' {} + 2>/dev/null`);
+// Folder picker: the usual folders are ticked; "Find files" only searches the ticked ones.
+const USUAL_FOLDERS = /^(DCIM|Download|Pictures|Movies|Music|Documents|Recordings|Podcasts|Audiobooks|Ringtones|Alarms|Notifications)$/i;
+let FOLDERS = null, folderSel = new Set();
+async function loadFolders() {
+  const out = await sh("for d in /sdcard/*/ /sdcard/.*/; do echo \"$d\"; done; ls /storage 2>/dev/null");
+  const lines = out.split("\n").map((l) => l.trim()).filter(Boolean);
+  const inner = lines.filter((l) => l.startsWith("/sdcard/") && !/\/\.\.?\/$/.test(l) && !l.includes("*"))
+    .map((path) => ({ path, name: path.slice(8, -1) }))
+    .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  const cards = lines.filter((l) => !l.startsWith("/") && l !== "emulated" && l !== "self").map((n) => ({ path: `/storage/${n}/`, name: `SD card ${n}`, card: true }));
+  FOLDERS = [...inner, ...cards];
+  folderSel = new Set(FOLDERS.filter((f) => USUAL_FOLDERS.test(f.name)).map((f) => f.path));
+}
+async function loadFiles(roots) {
+  const out = await sh(`find ${roots.map(q).join(" ")} -type f -exec stat -c '%s %n' {} + 2>/dev/null`);
   FILES = [];
   for (const line of out.split("\n")) {
     const i = line.indexOf(" ");
     if (i > 0 && /^\d+$/.test(line.slice(0, i))) FILES.push({ size: Number(line.slice(0, i)), path: line.slice(i + 1) });
   }
   FILES.sort((a, b) => b.size - a.size);
+}
+function renderFolderPicker() {
+  const list = $("#storageList");
+  if (!FOLDERS) { list.replaceChildren(el("div", "empty", "Loading folders...")); return; }
+  const head = el("div", "group"), n = FOLDERS.filter((f) => folderSel.has(f.path)).length;
+  head.append(el("div", "tick"), el("span", "", "Folders to look in"), el("span", "count", `${n} of ${FOLDERS.length} ticked`));
+  head.classList.toggle("all", n === FOLDERS.length); head.classList.toggle("some", n > 0 && n < FOLDERS.length);
+  head.onclick = () => { const all = n === FOLDERS.length; FOLDERS.forEach((f) => (all ? folderSel.delete(f.path) : folderSel.add(f.path))); renderFolderPicker(); renderStorageBar(); };
+  const rows = FOLDERS.map((f) => {
+    const r = el("div", "app" + (folderSel.has(f.path) ? " sel" : "")), i = el("div", "info");
+    i.append(el("div", "name", f.name), el("div", "pkg", f.card ? "Whole SD card" : "Internal/" + f.name));
+    r.append(el("div", "tick"), el("div", "icon filetype", f.card ? "SD" : "DIR"), i);
+    r.onclick = () => { folderSel.has(f.path) ? folderSel.delete(f.path) : folderSel.add(f.path); renderFolderPicker(); renderStorageBar(); };
+    return r;
+  });
+  list.replaceChildren(head, ...rows);
 }
 
 function storageRows() {
@@ -1522,7 +1543,7 @@ function renderStorageList() {
     return c;
   }));
   const list = $("#storageList");
-  if (storageView === "files" && !FILES) { list.replaceChildren(el("div", "empty", "Loading...")); return; }
+  if (storageView === "files" && !FILES) { $("#fileChips").classList.add("hidden"); renderFolderPicker(); renderStorageBar(); return; }
   const all = storageRows(), rows = storageView === "files" ? all.slice(0, SHOW_FILES) : all;
   const key = (x) => storageView === "apps" ? x.p : x.path;
   const total = all.reduce((n, x) => n + x.size, 0);
@@ -1560,12 +1581,29 @@ function renderStorageList() {
 let barView = null, bar = {};
 const selectedStorageRows = () => storageRows().filter((x) => storageSel.has(storageView === "apps" ? x.p : x.path));
 function renderStorageBar() {
-  if (barView !== storageView) {
-    barView = storageView; bar = { info: el("span", "muted") };
+  const view = storageView === "files" && !FILES ? "folders" : storageView;
+  if (view === "folders") {
+    if (barView !== "folders") {
+      barView = "folders"; bar = { info: el("span", "muted"), find: el("button", "btn primary", "Find files") };
+      bar.find.onclick = () => runButton(bar.find, async (set) => {
+        set("Looking through files...");
+        await loadFiles(FOLDERS.filter((f) => folderSel.has(f.path)).map((f) => f.path));
+        storageSel.clear(); renderStorageList();
+      });
+      bar.acts = [];
+      $("#storageBar").replaceChildren(bar.info, bar.find);
+    }
+    const n = folderSel.size;
+    bar.info.textContent = n ? `${n} folder${n > 1 ? "s" : ""} ticked` : "Tick the folders to look in";
+    if (!bar.find.dataset.running) bar.find.disabled = !n;
+    return;
+  }
+  if (barView !== view) {
+    barView = view; bar = { info: el("span", "muted") };
     if (storageView === "apps") {
       bar.caches = el("button", "btn", "Clear all caches");
       bar.caches.title = "Ask Android to empty every app's cache. Apps keep their data and sign-ins.";
-      bar.caches.onclick = () => runButton(bar.caches, async () => {
+      bar.caches.onclick = async () => (await confirmWithLock("Clear all caches?", "Every app's cache is emptied. Apps keep their data and sign-ins.", "Clear caches")) && runButton(bar.caches, async () => {
         log((await sh("pm trim-caches 4096G")).trim() || "Caches cleared.");
         STORAGE = parseDiskstats(await sh("dumpsys diskstats")); renderStorageSummary(); renderStorageList();
       });
@@ -1575,8 +1613,8 @@ function renderStorageBar() {
       bar.acts = [bar.clear, bar.uninstall];
       $("#storageBar").replaceChildren(bar.info, bar.caches, bar.clear, bar.uninstall);
     } else {
-      bar.reload = el("button", "btn", "Look again");
-      bar.reload.onclick = () => runButton(bar.reload, async () => { FILES = null; storageSel.clear(); await loadFiles(); renderStorageList(); });
+      bar.reload = el("button", "btn", "Choose folders");
+      bar.reload.onclick = () => { FILES = null; storageSel.clear(); renderStorageList(); };
       bar.del = el("button", "btn danger", "Delete");
       bar.del.onclick = () => deleteFiles(bar.del, selectedStorageRows());
       bar.acts = [bar.del];
@@ -1597,7 +1635,7 @@ async function storageAppAction(btn, rows, what) {
   const names = ok.slice(0, 8).map((x) => x.a.name).join(", ") + (ok.length > 8 ? ` and ${ok.length - 8} more` : "");
   const text = (what === "uninstall" ? `Remove ${ok.length} apps from the phone: ${names}.` : `Erase all data of ${ok.length} apps (sign-ins, settings, files): ${names}. They stay installed.`) +
     (skipped ? `\n\n${skipped} selected ${skipped > 1 ? "are" : "is"} skipped (${what === "uninstall" ? "preinstalled" : "system parts"}).` : "");
-  if (await modal(what === "uninstall" ? "Uninstall?" : "Clear data?", text, [["Cancel", ""], [what === "uninstall" ? "Uninstall" : "Clear data", "ok", "primary"]]) !== "ok") return;
+  if (!await confirmWithLock(what === "uninstall" ? "Uninstall?" : "Clear data?", text, what === "uninstall" ? "Uninstall" : "Clear data")) return;
   await runButton(btn, async (set) => {
     let done = 0, failed = 0;
     for (const x of ok) {
@@ -1619,14 +1657,8 @@ async function storageAppAction(btn, rows, what) {
 async function deleteFiles(btn, rows) {
   const size = rows.reduce((n, x) => n + x.size, 0);
   const list = rows.slice(0, 6).map((x) => "  " + x.path.replace(/^\/sdcard\/*/, "")).join("\n") + (rows.length > 6 ? `\n  ...and ${rows.length - 6} more` : "");
-  // Many files at once must be confirmed by typing, like DELETE ALL in the script.
-  let typed = null;
-  if (rows.length > 20) { typed = el("input", "search"); typed.placeholder = "Type DELETE"; typed.style.cssText = "width:100%;margin-top:12px"; }
-  const answer = await modal(`Permanently delete ${rows.length} files (${fmtBytes(size)})?`,
-    `${list}\n\nFiles are overwritten before removal and skip the trash. This cannot be undone.`,
-    [["Cancel", ""], ["Delete", "ok", "primary"]], typed);
-  if (answer !== "ok") return;
-  if (typed && typed.value.trim() !== "DELETE") { toast("Not deleted: type DELETE to confirm."); return; }
+  if (!await confirmWithLock(`Permanently delete ${rows.length} files (${fmtBytes(size)})?`,
+    `${list}\n\nFiles are overwritten before removal and skip the trash. This cannot be undone.`, "Delete")) return;
   await runButton(btn, async (set) => {
     const results = {};
     for (let i = 0; i < rows.length; i += 50) {
@@ -1648,10 +1680,294 @@ async function deleteFiles(btn, rows) {
   });
 }
 
+// ---------- screen lock check: every delete, reset, uninstall and clear-data asks for it ----------
+// The phone checks the code itself ("locksettings verify"), so a wrong code changes nothing. The field shows dots.
+async function confirmWithLock(title, text, okLabel) {
+  let error = "";
+  for (;;) {
+    const box = el("div"), pw = el("input", "search"), err = el("p", "small");
+    pw.type = "password"; pw.autocomplete = "off"; pw.spellcheck = false;
+    pw.placeholder = "Screen lock (a pattern as digits 1-9)";
+    pw.style.cssText = "width:100%;margin-top:8px";
+    err.style.color = "var(--red)"; err.textContent = error;
+    box.append(el("label", "small muted", "Type the phone's PIN, password or pattern to confirm. Leave it empty if the phone has no screen lock."), pw, err);
+    pw.onkeydown = (e) => { if (e.key === "Enter") pw.closest("dialog").querySelector(".actions .primary").click(); };
+    setTimeout(() => pw.focus(), 50);
+    if (await modal(title, text, [["Cancel", ""], [okLabel, "ok", "primary"]], box) !== "ok") return false;
+    const code = pw.value; pw.value = "";
+    // The answer can repeat the typed code, so it is never logged.
+    const out = await queue(() => sh(code ? `locksettings verify --old ${q(code)}` : "locksettings verify"));
+    if (/verified successfully/i.test(out)) return true;
+    if (/unknown command|usage:/i.test(out) && !/didn't match|wrong/i.test(out)) {
+      await modal("Cannot check the screen lock", "This phone does not let USB debugging check the screen lock, so this action is blocked here. Use the script instead.", [["OK", "ok", "primary"]]);
+      return false;
+    }
+    error = /throttl|try again|timeout/i.test(out) ? "Too many wrong tries: the phone makes you wait. Try again later."
+      : "Wrong screen lock. Wrong tries count as failed unlock attempts on the phone.";
+  }
+}
+
+// ---------- contacts, calendar, call log, SMS (port of the script) ----------
+const CONTACTS_URI = "content://com.android.contacts/contacts", SMS_URI = "content://sms";
+// [uri, projection, label fields, note, filter for rows that still exist]
+const CONTENT = {
+  "Contacts": [CONTACTS_URI, "_id:display_name", ["display_name"], "Synced contacts are also deleted from their account (Google, Samsung).", ""],
+  // Synced events stay as deleted=1 rows until the next sync, so those count as gone.
+  "Calendar": ["content://com.android.calendar/events", "_id:title:dtstart", ["title", "dtstart"], "Synced events are also deleted from their account.", "deleted=0"],
+  "Call log": ["content://call_log/calls", "_id:number:date", ["number", "date"], "", ""],
+  "SMS": [SMS_URI, "_id:address:date:body", ["address", "date", "body"], "RCS chats are not stored here.", ""],
+};
+function parseRows(text) {
+  const rows = [];
+  for (const line of text.split("\n")) {
+    const m = line.match(/^Row: \d+ (.*)/);
+    if (m) rows.push(Object.fromEntries([...m[1].matchAll(/(\w+)=(.*?)(?=, \w+=|$)/g)].map((x) => [x[1], x[2]])));
+  }
+  return rows;
+}
+function contentLabel(row, fields) {
+  return fields.map((f) => {
+    const v = row[f] ?? "";
+    return (f === "date" || f === "dtstart") && /^\d+$/.test(v) ? new Date(Number(v)).toLocaleString() : v;
+  }).filter(Boolean);
+}
+async function loadContent(name) {
+  const [uri, projection, fields, , live] = CONTENT[name];
+  const out = await sh(`content query --uri ${uri} --projection ${projection}${live ? ` --where ${q(live)}` : ""}`);
+  if (!out.includes("Row:") && !out.includes("No result found")) throw new Error(firstError(out));
+  return parseRows(out).filter((r) => r._id).map((r) => { const [label, ...rest] = contentLabel(r, fields); return { id: r._id, label: label || "(no name)", sub: rest.join(" · ") }; });
+}
+// Delete rows whose id matches condition, such as "=5" or " IN (5,6)".
+async function deleteRows(uri, condition) {
+  // The contacts table accepts deletes but ignores them, so its raw contacts are deleted instead.
+  const [target, key] = uri === CONTACTS_URI ? ["content://com.android.contacts/raw_contacts", "contact_id"] : [uri, "_id"];
+  const del = `content delete --uri ${target} --where ${q(key + condition)}`;
+  // Android silently ignores SMS writes from the shell unless this app-op is allowed for a moment.
+  await sh(uri === SMS_URI ? `appops set com.android.shell WRITE_SMS allow; ${del}; appops set com.android.shell WRITE_SMS default` : del);
+}
+// Delete in batches of 200, check what is left, retry leftovers one by one. Returns the ids that remain.
+async function deleteContent(name, ids, progress) {
+  const [uri, , , , live] = CONTENT[name];
+  const failed = [];
+  for (let i = 0; i < ids.length; i += 200) {
+    const batch = ids.slice(i, i + 200), where = `_id IN (${batch.join(",")})`;
+    await deleteRows(uri, ` IN (${batch.join(",")})`);
+    const out = await sh(`content query --uri ${uri} --projection _id --where ${q(live ? `${where} AND ${live}` : where)}`);
+    // A permission error also returns no rows, so only an explicit empty answer clears the batch.
+    const left = out.includes("No result found") ? [] : out.includes("Row:") ? parseRows(out).map((r) => r._id) : batch;
+    for (const id of left) {
+      await deleteRows(uri, `=${id}`);
+      const check = await sh(`content query --uri ${uri} --projection _id --where ${q(live ? `_id=${id} AND ${live}` : `_id=${id}`)}`);
+      if (!check.includes("No result found")) failed.push(id);
+    }
+    progress(Math.min(i + 200, ids.length));
+  }
+  return failed;
+}
+
+// ---------- settings and saved Wi-Fi (port of the script) ----------
+const SETTING_CATEGORIES = [["Wi-Fi", /wifi|wlan/i], ["Bluetooth", /bluetooth|^ble_/i],
+  ["Mobile data & network", /mobile_data|data_roaming|airplane|network|apn|hotspot|tether|vpn|dns/i], ["Location", /location|gps/i],
+  ["Sound & vibration", /volume|sound|ringtone|ringer|vibrat|haptic|dtmf|zen_/i], ["Display", /display|screen|brightness|font|night|dark|rotation|wallpaper/i],
+  ["Notifications", /notification/i], ["Battery & power", /battery|power/i], ["Accessibility", /accessibility/i], ["Date & time", /auto_time|time_12|time_zone|timezone/i]];
+const SETTINGS_OTHER = "Other";
+// Resetting these can cut USB debugging, trap the phone in setup, or break unlock and typing.
+const PROTECTED_SETTINGS = /adb|development_settings|provisioned|user_setup|setup_wizard|android_id|input_method|lock|boot|verifier|bluetooth_address|bluetooth_name|device_name|multi_sim|^sim_|subscription/i;
+const settingCategory = (key) => (SETTING_CATEGORIES.find(([, re]) => re.test(key)) || [SETTINGS_OTHER])[0];
+async function loadSettingsCategory(cat) {
+  const items = [];
+  for (const ns of ["system", "secure", "global"])
+    for (const m of (await sh(`settings list ${ns}`)).matchAll(/^([\w.\-]+)=(.*)$/gm))
+      if (!PROTECTED_SETTINGS.test(m[1]) && settingCategory(m[1]) === cat)
+        items.push({ id: `${ns}/${m[1]}`, label: m[1], sub: `${ns} = ${m[2].slice(0, 60)}` });
+  return items;
+}
+// One network can span several rows with the same id, one per security type.
+const parseWifi = (t) => [...new Map([...t.matchAll(/^(\d+)[ \t]+(.*?)[ \t]+\S+[ \t]*$/gm)].map((m) => [m[1], m[2]])).entries()];
+async function loadWifi() { return parseWifi(await sh("cmd wifi list-networks")).map(([id, ssid]) => ({ id, label: ssid, sub: `Network id ${id}` })); }
+
+// ---------- keyboard learned words ----------
+async function loadKeyboards() {
+  if (!appsLoaded) await loadApps();
+  const pkgs = [...new Set((await sh("ime list -a -s")).split("\n").filter((l) => l.includes("/")).map((l) => l.split("/")[0].trim()))];
+  pkgs.push("com.android.providers.userdictionary");
+  const known = new Map(APPS.map((a) => [a.p, a]));
+  return pkgs.filter((p) => known.has(p)).map((p) => ({ id: p, label: p.endsWith("userdictionary") ? "Personal dictionary" : known.get(p).name, sub: p, a: known.get(p) }));
+}
+
+// ---------- cleanup tab ----------
+// [title, kind]. List kinds show items to select and delete; the others are single actions.
+const CLEAN = [
+  ["Delete", null], ["Contacts", "content"], ["Calendar", "content"], ["Call log", "content"], ["SMS", "content"],
+  ["Files", "storage"], ["Apps & app data", "storage"],
+  ["Reset", null], ["Saved Wi-Fi networks", "wifi"], ["Settings", "settings"], ["Keyboard learned words", "keyboard"], ["Screen lock & fingerprints", "lock"],
+  ["Tools", null], ["Close apps & free RAM", "ram"], ["Flush free space", "trim"], ["Install an app", "install"], ["App names & icons", "names"],
+];
+let cleanChoice = "Contacts", settingsCat = "Wi-Fi";
+function renderCleanup() {
+  $("#cleanNav").replaceChildren(...CLEAN.map(([title, kind]) => {
+    if (!kind) return el("div", "group", title);
+    const b = el("button"); b.setAttribute("aria-pressed", title === cleanChoice);
+    b.append(el("span", "", title), ...(kind === "storage" ? [el("span", "muted small", "Storage tab")] : []));
+    b.onclick = () => {
+      if (kind === "storage") { storageView = title === "Files" ? "files" : "apps"; showTab("storage"); if (storageView === "files") $("#storageView [data-v=files]").click(); return; }
+      cleanChoice = title; renderCleanup();
+    };
+    return b;
+  }));
+  const kind = CLEAN.find(([t]) => t === cleanChoice)[1];
+  const pane = $("#cleanPane");
+  if (kind === "content") return itemList(pane, {
+    title: cleanChoice, note: CONTENT[cleanChoice][3], load: () => loadContent(cleanChoice), verb: "Delete",
+    run: (ids, progress) => deleteContent(cleanChoice, ids, progress),
+  });
+  if (kind === "wifi") return itemList(pane, {
+    title: "Saved Wi-Fi networks", note: "Forgotten networks need their password again to reconnect.", load: loadWifi, verb: "Forget",
+    run: async (ids, progress) => {
+      let n = 0; for (const id of ids) { await sh(`cmd wifi forget-network ${q(id)}`); progress(++n); }
+      const left = new Set(parseWifi(await sh("cmd wifi list-networks")).map(([id]) => id));
+      return ids.filter((id) => left.has(id));
+    },
+  });
+  if (kind === "settings") {
+    const chips = el("div", "chips");
+    for (const name of [...SETTING_CATEGORIES.map(([n]) => n), SETTINGS_OTHER]) {
+      const c = el("button", "chip", name); c.setAttribute("aria-pressed", name === settingsCat);
+      c.onclick = () => { settingsCat = name; renderCleanup(); };
+      chips.append(c);
+    }
+    return itemList(pane, {
+      title: "Settings", note: "Resetting a setting puts it back to the phone's default. Settings that could cut this connection or lock you out are not listed." +
+        (settingsCat === "Bluetooth" ? " Paired devices cannot be removed over USB: unpair them on the phone." : ""),
+      top: chips, load: () => loadSettingsCategory(settingsCat), verb: "Reset", noSelectAll: settingsCat === SETTINGS_OTHER,
+      run: async (ids, progress) => {
+        let n = 0; const failed = [];
+        for (const id of ids) {
+          const [ns, key] = [id.slice(0, id.indexOf("/")), id.slice(id.indexOf("/") + 1)];
+          if ((await sh(`settings delete ${ns} ${q(key)}; settings get ${ns} ${q(key)}`)).trim().split("\n").pop() !== "null") failed.push(id);
+          progress(++n);
+        }
+        return failed;
+      },
+    });
+  }
+  if (kind === "keyboard") return itemList(pane, {
+    title: "Keyboard learned words", note: "Erases learned words, predictions and that keyboard's settings. Words synced to a cloud account are not touched.",
+    load: loadKeyboards, verb: "Erase", icons: true,
+    run: async (ids, progress) => { let n = 0; const failed = []; for (const p of ids) { if (!(await sh(`pm clear ${q(p)}`)).includes("Success")) failed.push(p); progress(++n); } return failed; },
+  });
+  pane.replaceChildren(toolCard(kind));
+}
+
+// Generic "list, select, act" screen. opts: {title, note, top, load, verb, run(ids, progress) -> ids that failed, noSelectAll, icons}
+// Built once per category; afterwards only the rows and the counter change, so the button keeps its progress and "Done".
+async function itemList(pane, opts) {
+  const search = el("input", "search"); search.type = "search"; search.placeholder = "Search";
+  const list = el("div", "list"), info = el("span", "muted"), reload = el("button", "btn", "Load again"), act = el("button", "btn danger", opts.verb);
+  const bar = el("div", "applybar"); bar.append(info, reload, act);
+  const head = el("div"); head.append(el("h1", "", opts.title), ...(opts.note ? [el("p", "lead", opts.note)] : []));
+  pane.replaceChildren(head, ...(opts.top ? [opts.top] : []), search, list, bar);
+  search.style.cssText = "width:100%;margin-bottom:12px";
+  let items = [], sel = new Set();
+  const shown = () => { const s = search.value.trim().toLowerCase(); return items.filter((x) => !s || (x.label + " " + (x.sub || "")).toLowerCase().includes(s)); };
+  const draw = () => {
+    const rows = shown(), out = [];
+    if (!opts.noSelectAll && rows.length) {
+      const h = el("div", "group"), n = rows.filter((x) => sel.has(x.id)).length;
+      h.append(el("div", "tick"), el("span", "", `${rows.length} ${rows.length === 1 ? "item" : "items"}`), el("span", "count", n ? `${n} selected` : ""));
+      h.classList.toggle("all", n === rows.length); h.classList.toggle("some", n > 0 && n < rows.length);
+      h.onclick = () => { const all = rows.every((x) => sel.has(x.id)); rows.forEach((x) => (all ? sel.delete(x.id) : sel.add(x.id))); draw(); };
+      out.push(h);
+    }
+    for (const x of rows) {
+      const r = el("div", "app" + (sel.has(x.id) ? " sel" : "")), i = el("div", "info");
+      i.append(el("div", "name", x.label), ...(x.sub ? [el("div", "pkg", x.sub)] : []));
+      r.append(el("div", "tick"), ...(opts.icons && x.a ? [iconEl(x.a)] : []), i);
+      r.onclick = () => { sel.has(x.id) ? sel.delete(x.id) : sel.add(x.id); draw(); };
+      out.push(r);
+    }
+    if (!rows.length) out.push(el("div", "empty", items.length ? "Nothing matches." : "Nothing here."));
+    list.replaceChildren(...out);
+    info.textContent = sel.size ? `${sel.size} selected` : "Click items to select them";
+    if (!act.dataset.running && !act.classList.contains("done") && !act.classList.contains("warn")) act.disabled = !sel.size;
+  };
+  search.oninput = draw;
+  const load = async () => {
+    list.replaceChildren(el("div", "empty", "Loading..."));
+    try { items = await queue(opts.load); } catch (e) { items = []; list.replaceChildren(el("div", "empty", "Could not read this: " + e.message)); return; }
+    sel = new Set([...sel].filter((id) => items.some((x) => x.id === id)));
+    draw();
+  };
+  reload.onclick = () => load();
+  act.onclick = async () => {
+    const chosen = items.filter((x) => sel.has(x.id));
+    if (!chosen.length) return;
+    const names = chosen.slice(0, 6).map((x) => "  " + x.label).join("\n") + (chosen.length > 6 ? `\n  ...and ${chosen.length - 6} more` : "");
+    if (!await confirmWithLock(`${opts.verb} ${chosen.length} ${chosen.length === 1 ? "item" : "items"}?`, `${names}\n\nThis cannot be undone.`, opts.verb)) return;
+    await runButton(act, async (set) => {
+      const ids = chosen.map((x) => x.id);
+      set(`${opts.verb === "Delete" ? "Deleting" : "Working"} 0/${ids.length}...`);
+      const failed = new Set(await opts.run(ids, (n) => set(`${n}/${ids.length}...`)));
+      items = items.filter((x) => !sel.has(x.id) || failed.has(x.id));
+      sel = new Set([...sel].filter((id) => failed.has(id)));
+      log(`${opts.title}: ${opts.verb.toLowerCase()} ${ids.length - failed.size} of ${ids.length}.`);
+      draw();
+      if (failed.size) return `⚠ ${failed.size} failed`;
+    });
+    draw();
+  };
+  await load();
+}
+
+// Single-action cleanup tools.
+function toolCard(kind) {
+  const card = el("div", "card"), res = el("div", "result");
+  const button = (label, cls, fn) => { const b = el("button", "btn " + cls, label); b.onclick = () => fn(b); return b; };
+  const head = (t, p) => card.append(el("h1", "", t), el("p", "muted", p));
+  if (kind === "ram") {
+    head("Close apps & free RAM", "Normal closes background apps and services; notifications keep working. Hard also force-stops your apps, except the keep list: they get no notifications or alarms until you open them again.");
+    const row = el("div", "row");
+    row.append(button("Free RAM", "primary", (b) => runButton(b, () => freeRam(false), res)), button("Hard: also force-stop apps", "", (b) => runButton(b, () => freeRam(true), res)));
+    card.append(row);
+  } else if (kind === "trim") {
+    head("Flush free space", "Sends TRIM so the storage chip erases blocks freed by deleted files. Existing files are not touched.");
+    card.append(button("Flush free space", "primary", (b) => ACTIONS.trim(b)));
+  } else if (kind === "install") {
+    head("Install an app", "Install an .apk file from this computer. Updates the app if it is already installed and keeps its data. Split bundles (.apks, .xapk) need the script.");
+    const file = el("input"); file.type = "file"; file.accept = ".apk"; file.id = "apkFile";
+    const row = el("div", "row"); row.style.marginTop = "12px";
+    row.append(button("Install", "primary", (b) => runButton(b, installApk, res)));
+    card.append(file, row);
+  } else if (kind === "names") {
+    head("App names & icons", "Names and icons are read from each app once and remembered in this browser. Read them again after a language change.");
+    card.append(button("Read names again", "primary", (b) => runButton(b, async () => { await cache.clear(); APPS.forEach((a) => { a.icon = ""; a.name = nameOf(a.p); }); appsLoaded = false; await loadApps(); log("Names and icons are being read again (see the Apps tab)."); }, res)));
+  } else if (kind === "lock") {
+    head("Screen lock & fingerprints", "Removes the screen lock (PIN, pattern or password). Android then deletes the fingerprints and face unlock tied to it, and apps lose keys protected by the lock, so banking or wallet apps may need setting up again. Anyone holding the phone can then open it.");
+    card.append(button("Remove screen lock", "danger", (b) => removeLock(b, res)));
+  }
+  card.append(res);
+  return card;
+}
+
+async function removeLock(btn, res) {
+  const typed = el("input", "search"); typed.placeholder = "Type REMOVE"; typed.style.cssText = "width:100%;margin-top:8px";
+  const pw = el("input", "search"); pw.type = "password"; pw.autocomplete = "off"; pw.placeholder = "Current screen lock (a pattern as digits 1-9)"; pw.style.cssText = "width:100%;margin-top:8px";
+  const box = el("div"); box.append(typed, pw);
+  if (await modal("Remove the screen lock?", "Type REMOVE and the current screen lock.", [["Cancel", ""], ["Remove", "ok", "primary"]], box) !== "ok") return;
+  const code = pw.value; pw.value = "";
+  if (typed.value.trim() !== "REMOVE" || !code) { res.textContent = "Not removed: type REMOVE and the current screen lock."; return; }
+  await runButton(btn, async () => {
+    const out = await sh(`locksettings clear --old ${q(code)}`);
+    if (/cleared/i.test(out)) { log("Screen lock removed. Check Settings > Fingerprint to confirm the fingerprints are gone."); return; }
+    log("Not removed: wrong screen lock, or the phone refused. Wrong tries count as failed unlock attempts.");
+    return "⚠ Not removed";
+  }, res);
+}
+
 // ---------- tabs and wiring ----------
 let tab = "apps";
 const TAB_LOAD = { apps: () => appsLoaded || loadApps(), battery: refreshStatus, settings: renderSettings,
-  permissions: renderPermissions, radios: renderRadios, storage: renderStorage, tools: () => {} };
+  permissions: renderPermissions, radios: renderRadios, storage: renderStorage, cleanup: () => { renderCleanup(); } };
 function showTab(name) {
   tab = name;
   document.querySelectorAll("[data-tab]").forEach((t) => t.setAttribute("aria-selected", t.dataset.tab === name));
@@ -1677,7 +1993,7 @@ $("#showAllSystem").onchange = (e) => { showAllSystem = e.target.checked; saveJs
 $("#storageSearch").oninput = () => STORAGE && renderStorageList();
 $("#storageView").querySelectorAll("button").forEach((b) => (b.onclick = () => {
   storageView = b.dataset.v; storageSel.clear();
-  if (storageView === "files" && !FILES) { renderStorageList(); queue(async () => { await loadFiles(); renderStorageList(); }).catch(showError); }
+  if (storageView === "files" && !FOLDERS) { renderStorageList(); queue(async () => { await loadFolders(); renderStorageList(); }).catch(showError); }
   else renderStorageList();
 }));
 $("#reload").onclick = () => runButton($("#reload"), loadApps);
@@ -1694,14 +2010,13 @@ const ACTIONS = {
       [["Cancel", ""], ["Restore", "ok", "primary"]]) !== "ok") return;
     await runButton(b, async () => { await restoreAll(); await refreshStatus(); }, card("restore"));
   },
-  ram: (b) => runButton(b, freeRam, card("ram")),
+
   trim: (b) => runButton(b, async () => {
     const out = (await sh("sm fstrim")).trim();
     if (out.includes("Exception")) throw new Error("TRIM refused: " + out.slice(0, 200));
     log("TRIM accepted. The storage chip erases the freed blocks on its own schedule, so leave the phone on and charging for a while.");
-  }, card("trim")),
-  install: (b) => runButton(b, installApk, card("install")),
-  clearNames: (b) => runButton(b, async () => { await cache.clear(); APPS.forEach((a) => { a.icon = ""; a.name = nameOf(a.p); }); appsLoaded = false; await loadApps(); log("Names and icons are being read again (see the Apps tab)."); }, card("clearNames")),
+  }, b.closest(".card").querySelector(".result")),
+
 };
 document.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => Promise.resolve(ACTIONS[b.dataset.act](b)).catch(showError)));
 

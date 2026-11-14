@@ -1,44 +1,37 @@
-# Battery Optimizer for Android (Linux, Windows and browser)
+# Battery Optimizer for Android
 
-**Make your Android phone's battery last much longer, controlled from your computer over a USB cable.**
+ADB-based battery optimizer and cleanup tool for Android. Runs from Linux, Windows or the browser over USB debugging. No root, nothing installed on the phone.
 
-No root needed. No app to install on the phone. One script, one menu.
+## [Open the web app →](https://azp3001.github.io/battery-optimizer/web/)
 
-> 🌐 **Try it in the browser:** https://azp3001.github.io/battery-optimizer/web/
-> ⚠️ The website is **experimental** and **not recommended over the scripts yet**. It has the Battery, Optimize, Autostart and Permissions tools, real app names and icons, a Storage tab (apps and files by size: uninstall, clear data, delete files) and some Cleanup tools (free RAM, flush free space, install an APK). Deleting contacts, messages and settings is only in the scripts. It has not been tested as much. For now, use the Linux script or the Windows file below.
+**https://azp3001.github.io/battery-optimizer/web/** · Chrome or Edge (WebUSB) · nothing to install
 
-## What it does, in plain words
+## Features
 
-Most battery drain happens while the phone is in your pocket: apps wake up, run in the background, use mobile data and keep the phone from sleeping. This tool stops that.
+- **MAX BATTERY**: power saving, dark mode, deep sleep, battery settings, app restrictions and background data blocking in one step. `RESTORE` undoes it.
+- **Keep list**: apps that keep running in the background (messengers, banking). Everything else is restricted once (no constant killing, so apps don't restart over and over).
+- **App control**: per app or for a selection: background running, wake locks, start at boot, background mobile data, notifications, standby bucket, enable/disable.
+- **Deep sleep**: Doze 30 s after screen off (on phones that allow it over USB; otherwise quick doze via power saving).
+- **Permissions**: by permission or per app, including special access (usage access, install unknown apps, all files access, ...).
+- **Storage**: apps and files by size; uninstall, clear data, clear caches, secure file delete.
+- **Cleanup**: contacts, calendar, call log, SMS, saved Wi-Fi networks, settings reset, keyboard learned words, screen lock removal, free RAM, TRIM, APK install.
+- Destructive actions in the web app ask for the phone's screen lock, checked by the phone.
 
-1. **You pick the apps that must keep working** (for example WhatsApp, Signal, banking, school). This is the *keep list*.
-2. **Every other app gets put to sleep**: it can no longer run in the background, wake up the phone, or use mobile data in the background. It still works normally when you open it.
-3. **Battery-hungry settings get switched off**: power saving and dark mode on, Always On Display off, Wi-Fi/Bluetooth scanning off, wake gestures off, 30 s screen timeout, and more.
-4. **The phone goes into deep sleep** about 30 seconds after the screen turns off, instead of after many minutes.
-5. **Everything can be undone** with one button (`RESTORE`). The tool saves every old value before changing it.
+## Setup: USB debugging
 
-Apps are restricted **once**, not killed over and over. Killing apps on a timer makes them restart, and restarting costs more battery than letting them sleep.
+Settings > About phone > tap **Build number** 7 times. Then Settings > Developer options > **USB debugging** on. Plug in and allow the computer on the phone.
 
-## First: turn on USB debugging on the phone
+## Web app
 
-1. Settings > About phone > tap **Build number** 7 times.
-2. Settings > Developer options > turn on **USB debugging**.
-3. Plug the phone into the computer and tap **Allow** on the phone.
+Open the link above, press **Connect**, pick the phone. App names, icons and the keep list are stored in the browser. Close other ADB programs first (`adb kill-server`).
 
 ## Windows
 
-1. From the [Releases](https://github.com/AZP3001/battery-optimizer/releases) page, download **both** `battery-optimizer-windows.bat` and `battery-optimizer-linux.sh` into the same folder.
-2. **Double-click** `battery-optimizer-windows.bat`.
-
-That's it. The first start downloads the tools it needs by itself (about 130 MB, once) into `%LOCALAPPDATA%\battery-optimizer`. You don't have to install anything. Then the same menu as on Linux opens. Nothing is done to the phone until you choose it in the menu.
-
-If the `.bat` is on its own, it fetches the latest script from GitHub.
-
-Needs Windows 10 (version 1803) or newer. If the phone does not show up, Windows may need the phone's USB driver (Samsung: *Samsung USB Driver*, Pixel: *Google USB Driver*).
+Download `battery-optimizer-windows.bat` and `battery-optimizer-linux.sh` from [Releases](https://github.com/AZP3001/battery-optimizer/releases) into one folder and double-click the `.bat`. On first start it downloads portable bash, Python, fzf and adb (about 130 MB) into `%LOCALAPPDATA%\battery-optimizer`; nothing is installed system-wide. Windows 10 1803 or newer. Some phones need their USB driver (Samsung USB Driver, Google USB Driver).
 
 ## Linux
 
-You need `adb` (Android platform tools), `fzf` (menus) and `python3` 3.12 or newer.
+Requires `adb`, `fzf` and Python 3.12+.
 
 ```bash
 sudo apt install adb fzf python3
@@ -46,62 +39,51 @@ sudo apt install adb fzf python3
 
 Fedora: `sudo dnf install android-tools fzf python3` · Arch: `sudo pacman -S android-tools fzf python`
 
-Download `battery-optimizer-linux.sh` from the [Releases](https://github.com/AZP3001/battery-optimizer/releases) page, then:
-
 ```bash
 chmod +x battery-optimizer-linux.sh
 ```
 
 ```bash
-./battery-optimizer-linux.sh battery
+./battery-optimizer-linux.sh
 ```
 
-## How to use it
+## Script commands
 
-Open the **Battery** tool, choose **MAX BATTERY**, pick your keep list, type `GO`. Done. Restart the phone once afterwards.
-
-Use the arrow keys to move, **Enter** to choose, **Tab** to select several, **Esc** to go back.
-
-## All tools
-
-Run the script with no argument for a menu of everything, or name a tool directly (on Windows, double-click opens the menu):
-
-| Command | What it does |
+| Command | |
 |---|---|
-| `battery` | Everything for battery life in one place: MAX BATTERY, keep list, settings, deep sleep, mobile data, radios, status, RESTORE |
-| `optimize` | Pick apps one by one and stop them from running in the background |
-| `unoptimize` | Allow optimized apps to run in the background again |
-| `autostart` | See which apps start themselves when the phone boots, and block them |
-| `permissions` | See which apps have Camera, Location, Microphone, etc. and take permissions away |
-| `cleanup` | Securely delete files, contacts, SMS, call log, app data; disable apps; manage notifications; free RAM |
-| `install FILE.apk` | Install an app from your computer onto the phone |
-| `help` | Explain every tool |
-| `selfcheck` | Test the script's internals (no phone needed) |
+| (none) | Menu of all tools |
+| `battery` | MAX BATTERY, keep list, settings, deep sleep, mobile data, radios, status, RESTORE |
+| `optimize` / `unoptimize` | Restrict or allow apps in the background |
+| `autostart` | Apps that start at boot; block or allow |
+| `permissions` | Permissions by type |
+| `cleanup` | Files, contacts, calendar, call log, SMS, apps, app data, settings, keyboard words, screen lock, disable apps, notifications, free RAM, TRIM |
+| `install FILE.apk` | Install an APK (split bundles too) |
+| `help` | Description of every tool |
+| `selfcheck` | Parser self-test, no phone needed |
 
-## Is it safe?
+Keys: arrows to move, **Enter** to choose, **Tab** to select several, **Esc** to go back.
 
-- Critical system parts (calls, SMS, settings, keyboard, home screen) are hidden or protected, so you cannot switch them off by accident.
-- Apps that are *not recommended* to touch are shown in yellow.
-- Anything that deletes data asks you to confirm first, and "delete all" asks you to type a word.
-- `RESTORE` in the Battery menu undoes every change the Battery tool made.
-- **The `cleanup` tool deletes for real.** Files are overwritten before removal and do not go to a trash bin. Read before you confirm.
+## Safety
 
-The built-in app lists know Samsung, Google and Nothing apps best. Other brands work too; settings a phone does not have are skipped.
+- Critical system packages are hidden or protected; "not recommended" ones are marked.
+- Deletes are permanent: files are overwritten before removal and skip the trash.
+- `RESTORE` undoes everything the Battery tool changed.
+- The app tables know Samsung, Google and Nothing best; settings a phone doesn't have are skipped.
 
-## Files it keeps on your computer
+## Stored data
 
-| File | What it is |
-|---|---|
-| `~/.config/phone-keep.json` | Your keep list |
-| `~/.config/phone-battery-backup.json` | Old values, used by RESTORE |
-| `~/.config/phone-cleanup-exceptions.json` | Apps never closed by "free RAM" |
-| `~/.cache/phone-cleanup-*.json` | Cached app names (safe to delete) |
+| Script | Web app | |
+|---|---|---|
+| `~/.config/phone-keep.json` | browser storage | Keep list |
+| `~/.config/phone-battery-backup.json` | browser storage (per phone) | Old values for RESTORE |
+| `~/.config/phone-cleanup-exceptions.json` | keep list | Apps never closed by hard "free RAM" |
+| `~/.cache/phone-cleanup-*.json` | browser storage | App name / icon cache |
 
-On Windows `~` is your user folder (`C:\Users\<you>`). The website keeps the keep list and the RESTORE backup in the browser instead, so clearing the site's data loses them.
+On Windows `~` is `C:\Users\<you>`. Clearing the site's data in the browser loses the web app's keep list and RESTORE backup.
 
-## For developers
+## Development
 
-- `battery-optimizer-linux.sh`: the whole tool (bash and Python). The Windows `.bat` only downloads the tools and runs this same file.
-- `web/`: the website. `web/webadb.js` is a bundle of [ya-webadb](https://github.com/yume-chan/ya-webadb) (MIT) that talks to the phone over WebUSB. The page reads its app table from the script.
-- Every push to `main` that touches the website or the scripts republishes GitHub Pages automatically.
-- To make a release: Actions > Release > Run workflow, enter the version (for example `v1.1`).
+- `battery-optimizer-linux.sh`: the whole tool (bash front end + Python). The `.bat` downloads dependencies and runs it.
+- `web/`: the web app. `webadb.js` bundles [ya-webadb](https://github.com/yume-chan/ya-webadb) (MIT); `apk.js` reads app names and icons from APKs. The page reads its app table from the script.
+- GitHub Pages republishes on every push to `main`.
+- Release: Actions > Release > Run workflow, enter the version (e.g. `v1.2`).
