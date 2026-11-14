@@ -47,7 +47,10 @@ phonehelp() {
                Deep sleep: the phone goes into deep sleep about 30 s after
                the screen turns off, instead of after many minutes.
                Radios: Wi-Fi, mobile data, Bluetooth, NFC, location on/off.
-               Status: what is applied right now.
+               Battery use: the apps that used the most battery since the
+               last full charge, biggest first. Enter restricts them.
+               Status: what is applied right now, plus battery temperature,
+               health and estimated capacity.
                RESTORE: undo everything the Battery tool changed.
   optimize     Pick apps from a list. Each one is blocked from running in the
                background, holding wake locks and starting foreground
@@ -2013,6 +2016,17 @@ BATTERY_SETTINGS = [
     ("global", "cached_apps_freezer", "enabled", False, "Freeze apps in the background (after a restart)"),
     ("global", "adaptive_battery_management_enabled", "1", False, "Adaptive battery: on"),
     ("global", "low_power_sticky", "1", False, "Power saving stays on after a restart"),
+    ("global", "low_power_sticky_auto_disable_enabled", "0", False, "Power saving comes back after charging"),
+    ("global", "app_auto_restriction_enabled", "1", False, "Android restricts battery-draining apps by itself: on"),
+    ("global", "wifi_wakeup_enabled", "0", False, "Turn on Wi-Fi automatically: off"),
+    ("global", "wifi_scan_throttle_enabled", "1", False, "Wi-Fi scan throttling: on"),
+    ("global", "disable_window_blurs", "1", False, "Background blur: off"),
+    ("secure", "doze_enabled", "0", False, "Screen wakes for new notifications: off"),
+    ("secure", "doze_pick_up_gesture", "0", False, "Lift to check phone: off"),
+    ("secure", "doze_double_tap_gesture", "0", False, "Double tap to check phone: off"),
+    ("secure", "adaptive_sleep", "0", False, "Screen attention (camera watches your face): off"),
+    ("system", "peak_refresh_rate", "60.0", False, "Refresh rate: 60 Hz"),
+    ("system", "screen_brightness_mode", "1", False, "Adaptive brightness: on"),
     ("global", "battery_saver_constants", SAVER_CONSTANTS, False, "Stronger power saving mode"),
     ("global", "window_animation_scale", "0.5", False, "Window animations 0.5x"),
     ("global", "transition_animation_scale", "0.5", False, "Transition animations 0.5x"),
@@ -2091,6 +2105,50 @@ def radio_on(out):
 
 
 # Current value of every setting the Battery tool changes, in one adb call.
+def power_saver_command(on):
+    """Android refuses to switch power saving while the phone charges, and over USB it always charges.
+    So the charger is hidden from Android for a moment ("unplug" is only pretend, "reset" undoes it)."""
+    return f"cmd battery unplug; cmd power set-mode {1 if on else 0}; cmd battery reset"
+
+
+def power_saving_on():
+    """While charging, Android pauses power saving and remembers it as "sticky": it returns when unplugged."""
+    return "1" in adb("settings get global low_power; settings get global low_power_sticky")[1].split()[:2]
+
+
+def parse_battery(text):
+    """Level, temperature, health and estimated full capacity (mAh) from "dumpsys battery"."""
+    def num(key):
+        m = re.search(rf"^\s*{key}: (-?\d+)", text, re.M)
+        return int(m[1]) if m else None
+    level, temp, counter = num("level"), num("temperature"), num("Charge counter")
+    health = {1: "unknown", 2: "good", 3: "overheated", 4: "dead", 5: "over voltage", 6: "failed", 7: "cold"}.get(num("health"))
+    # charge counter is what is in the battery now (uAh); below 20% the estimate gets too rough
+    capacity = round(counter / 1000 * 100 / level) if counter and counter > 0 and level and level >= 20 else None
+    return {"level": level, "temp": temp / 10 if temp is not None else None, "health": health, "capacity": capacity}
+
+
+def battery_line(text):
+    b = parse_battery(text)
+    parts = [f"{b['level']}%" if b["level"] is not None else "unknown"]
+    if b["temp"] is not None:
+        parts.append(f"{b['temp']:.1f} °C")
+    if b["health"]:
+        parts.append(f"health {b['health']}")
+    if b["capacity"]:
+        parts.append(f"about {b['capacity']} mAh when full (estimate)")
+    return ", ".join(parts)
+
+
+def parse_power_use(text):
+    """[(uid, mAh)] biggest first, from the "Estimated power use" lines of "dumpsys batterystats"."""
+    use = {}
+    for app, plain, mah in re.findall(r"^\s+U(?:ID|id) (?:u0a(\d+)|(\d+)): ([\d.]+)", text, re.M):
+        uid = str(10000 + int(app)) if app else plain
+        use[uid] = use.get(uid, 0) + float(mah)
+    return sorted(use.items(), key=lambda u: -u[1])
+
+
 def read_settings():
     out = adb("; ".join(f'echo "#{ns}/{key}=$(settings get {ns} {key})"' for ns, key, *_ in BATTERY_SETTINGS))[1]
     return parse_marked(out)
@@ -2128,10 +2186,9 @@ def apply_settings(backup):
     if night and night != "yes":
         backup.setdefault("night_mode", night)
         commands.append("cmd uimode night yes")
-    power = adb("settings get global low_power")[1].strip()
-    if power != "1":
-        backup.setdefault("power_saver", power)
-        commands.append("cmd power set-mode 1")
+    if not power_saving_on():
+        backup.setdefault("power_saver", "0")
+        commands.append(power_saver_command(True))
     save_json(BACKUP_FILE, backup)  # saved before changing anything, so RESTORE works even if this stops halfway
     run_all(commands)
     after = read_settings()
@@ -2162,7 +2219,7 @@ def apply_deep_sleep(backup):
             backup.get("device_config", {}).pop(k, None)
         save_json(BACKUP_FILE, backup)
         print(f"  Deep sleep: this phone does not allow changing the sleep timers over USB ({reason}).")
-        if adb("settings get global low_power")[1].strip() == "1":
+        if power_saving_on():
             print("  No problem: power saving with quick doze is on, so the phone still goes into deep sleep")
             print("  right after the screen turns off. Keep power saving on to keep that.")
         else:
@@ -2191,8 +2248,7 @@ def battery_targets(keep):
 
 
 # Stop every app that is not on the keep list from running or waking the phone in the background.
-def restrict_apps(keep, backup):
-    targets, installed = battery_targets(keep)
+def restrict_packages(targets, backup):
     before = restricted_now()
     unrestricted = parse_user_whitelist(adb("dumpsys deviceidle whitelist")[1])
     # Only what the Battery tool changes is remembered, so RESTORE leaves apps you optimized before alone.
@@ -2205,6 +2261,11 @@ def restrict_apps(keep, backup):
         [f"cmd appops set {q} {op} ignore" for op in RESTRICT_OPS]
         + [f"am set-standby-bucket {q} restricted", f"dumpsys deviceidle whitelist -{q} >/dev/null 2>&1",
            f"am kill {q}"]))
+
+
+def restrict_apps(keep, backup):
+    targets, installed = battery_targets(keep)
+    restrict_packages(targets, backup)
     kept = sorted(keep & installed)
     in_batches(kept, lambda q: "; ".join(
         [f"cmd appops set {q} {op} allow" for op in RESTRICT_OPS + ("START_FOREGROUND",)]
@@ -2335,11 +2396,40 @@ def radios_menu():
 
 
 # Checklist of what is applied right now.
+def battery_use_menu(backup):
+    """Apps that used the most battery since the last full charge. Enter restricts the selected ones."""
+    out = adb("dumpsys batterystats --charged | grep -E '^ +U(ID|id) [u0-9a]+: [0-9.]+'")[1]
+    by_uid = {}
+    for package, uid in sorted(package_uids().items()):
+        by_uid.setdefault(uid, package)
+    use = [(by_uid[uid], mah) for uid, mah in parse_power_use(out) if uid in by_uid and mah >= 0.1]
+    if not use:
+        print("The phone has no battery use numbers yet. Use it off the charger for a while first.")
+        return
+    keep = load_keep() or set()
+    apks = parse_package_paths(adb("pm list packages -f")[1])
+    labels = load_labels({p: apks[p] for p, _ in use if p in apks})
+    while True:
+        restricted = restricted_now()
+        rows = [f"{mah:8.1f} mAh  {'[KEEP] ' if p in keep else '[restricted] ' if p in restricted else ''}{labels.get(p) or p} ({p})"
+                for p, mah in use]
+        chosen = pick("Battery use since the last full charge", rows,
+                      "Biggest first | Enter = restrict | Tab = select several | Esc = back", multi=True)
+        if not chosen:
+            return
+        picked = [use[i][0] for i in chosen]
+        selected = [p for p in picked if p not in keep and not PROTECTED_APPS.search(p)]
+        if len(selected) < len(picked):
+            print(f"  {len(picked) - len(selected)} skipped: on the keep list, or a part the phone needs.")
+        if selected:
+            restrict_packages(selected, backup)
+            print(f"  Restricted {len(set(selected) & restricted_now())} of {len(selected)}. RESTORE undoes it.")
+
+
 def battery_status(keep):
-    level = re.search(r"level: (\d+)", adb("dumpsys battery")[1])
-    print(f"\nBattery: {level[1] + '%' if level else 'unknown'}")
-    power = adb("settings get global low_power")[1].strip() == "1"
-    print(f"[{'x' if power else ' '}] Power saving on")
+    print(f"\nBattery: {battery_line(adb('dumpsys battery')[1])}")
+    power = power_saving_on()
+    print(f"[{'x' if power else ' '}] Power saving on (paused while charging, back when unplugged)")
     print(f"[{'x' if night_mode() == 'yes' else ' '}] Dark mode on")
     print(f"[{'x' if data_saver_on() else ' '}] Background mobile data blocked (Data Saver)")
     doze = read_doze()
@@ -2410,7 +2500,7 @@ def restore_all():
     if backup.get("night_mode"):
         commands.append(f"cmd uimode night {shlex.quote(backup['night_mode'])}")
     if "power_saver" in backup and backup["power_saver"] != "1":
-        commands.append("cmd power set-mode 0")
+        commands.append(power_saver_command(False))
     commands += [f"cmd netpolicy remove restrict-background-whitelist {u}" for u in backup.get("data_allowed", [])]
     commands += [f"cmd netpolicy remove restrict-background-blacklist {u}" for u in backup.get("data_blocked", [])]
     if backup.get("data_saver") is False:
@@ -2435,6 +2525,7 @@ def battery_menu():
         "Settings             power saving, dark mode, no AOD, no scanning, no wake gestures",
         "Deep sleep           sleep 30 seconds after the screen turns off",
         "Radios               Wi-Fi, mobile data, Bluetooth, NFC, location on or off",
+        "Battery use          which apps used the most battery since the last charge",
         "Status               what is applied right now",
         "RESTORE              undo everything the Battery tool changed",
     ]
@@ -2464,6 +2555,8 @@ def battery_menu():
             apply_deep_sleep(backup)
         elif name == "Radios":
             radios_menu()
+        elif name == "Battery use":
+            battery_use_menu(backup)
         elif name == "Status":
             battery_status(load_keep())
         elif name == "RESTORE":
@@ -2600,6 +2693,12 @@ def self_check():
     assert not safe_backup_path("DCIM/x.jpg", "com.a") and not safe_backup_path(None, "com.a")
     assert f"{'':>8}  Game A (com.a)"[10:].rsplit(" (", 1)[0] == "Game A"
     assert f"{fmt_size(999_000_000):>8}  Game A (com.a)"[10:].rsplit(" (", 1)[0] == "Game A"
+    stats = "  Estimated power use (mAh):\n    UID u0a213: 45.6 fg: 1 ( cpu=2 )\n    UID 1000: 12.5\n    Uid u0a7: 0.5\n  u0a213:\n    Wake lock x\n"
+    assert parse_power_use(stats) == [("10213", 45.6), ("1000", 12.5), ("10007", 0.5)]
+    batt = parse_battery("  level: 80\n  health: 2\n  temperature: 315\n  Charge counter: 3600000\n")
+    assert batt == {"level": 80, "temp": 31.5, "health": "good", "capacity": 4500}
+    assert parse_battery("level: 10\nCharge counter: 400000\n")["capacity"] is None and parse_battery("")["level"] is None
+    assert "set-mode 1" in power_saver_command(True) and power_saver_command(False).endswith("cmd battery reset")
     assert fmt_size(999) == "999 B" and fmt_size(1500) == "1.5 KB" and fmt_size(250_000_000) == "250 MB"
     print("self-check ok")
 

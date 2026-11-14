@@ -168,6 +168,9 @@
   /* install tab */
   .drop { display:flex; flex-direction:column; align-items:center; gap:4px; padding:36px 20px; margin-bottom:16px; border:2px dashed var(--line); border-radius:var(--radius); cursor:pointer; text-align:center; }
   .drop:hover, .drop.over { border-color:var(--accent); background:var(--accent-soft); }
+  .userow { display:flex; align-items:center; gap:10px; padding:5px 0; color:var(--text); }
+  .userow .icon { width:24px; height:24px; border-radius:7px; font-size:12px; }
+  .userow .name { flex:1; font-weight:500; }
   /* storage tab */
   .usage { display:flex; height:14px; border-radius:999px; overflow:hidden; background:var(--surface2); margin:14px 0 12px; }
   .usage span { height:100%; }
@@ -201,7 +204,7 @@
       <button role="tab" data-tab="install">Install</button>
       <button role="tab" data-tab="cleanup">Cleanup</button>
     </nav>
-    <div class="phone"><span class="dot" id="dot"></span><span id="phoneName" class="muted">Not connected</span>
+    <div class="phone"><span class="dot" id="dot"></span><span id="phoneName" class="muted">Not connected</span><span id="phoneBatt" class="muted"></span>
       <button class="btn" id="connectBtn">Connect</button><button class="btn hidden" id="disconnectBtn">Disconnect</button></div>
   </div>
 </header>
@@ -250,6 +253,9 @@
       </div>
       <div class="card"><h2>Status</h2><p class="muted small">What is applied right now.</p><ul class="status" id="statusList"><li class="muted">Loading...</li></ul>
         <div class="row" style="margin-top:12px"><button class="btn" data-act="status">Refresh</button></div></div>
+      <div class="card"><h2>Top battery users</h2><p class="muted small">Apps that used the most battery since the last full charge.</p>
+        <div id="useList" class="muted small">Press Show.</div>
+        <div class="row" style="margin-top:12px"><button class="btn" data-act="use">Show</button><button class="btn hidden" id="useSelect" title="Selects the ones not on your keep list, so you can restrict them">Select in Apps tab</button></div></div>
       <div class="card"><h2>Deep sleep</h2><p class="muted">The phone goes into deep sleep about 30 seconds after the screen turns off, instead of after many minutes.</p>
         <button class="btn" data-act="sleep">Turn on deep sleep</button><div class="result" id="res-sleep"></div></div>
       <div class="card"><h2>Restrict apps</h2><p class="muted">Restrict every app that is not on the keep list, without changing any settings.</p>
@@ -331,7 +337,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.4</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.5</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -393,6 +399,17 @@ const BATTERY_SETTINGS = [
   ["global", "cached_apps_freezer", "enabled", false, "Freeze apps in the background (after a restart)"],
   ["global", "adaptive_battery_management_enabled", "1", false, "Adaptive battery: on"],
   ["global", "low_power_sticky", "1", false, "Power saving stays on after a restart"],
+  ["global", "low_power_sticky_auto_disable_enabled", "0", false, "Power saving comes back after charging"],
+  ["global", "app_auto_restriction_enabled", "1", false, "Android restricts battery-draining apps by itself: on"],
+  ["global", "wifi_wakeup_enabled", "0", false, "Turn on Wi-Fi automatically: off"],
+  ["global", "wifi_scan_throttle_enabled", "1", false, "Wi-Fi scan throttling: on"],
+  ["global", "disable_window_blurs", "1", false, "Background blur: off"],
+  ["secure", "doze_enabled", "0", false, "Screen wakes for new notifications: off"],
+  ["secure", "doze_pick_up_gesture", "0", false, "Lift to check phone: off"],
+  ["secure", "doze_double_tap_gesture", "0", false, "Double tap to check phone: off"],
+  ["secure", "adaptive_sleep", "0", false, "Screen attention (camera watches your face): off"],
+  ["system", "peak_refresh_rate", "60.0", false, "Refresh rate: 60 Hz"],
+  ["system", "screen_brightness_mode", "1", false, "Adaptive brightness: on"],
   ["global", "battery_saver_constants", SAVER_CONSTANTS, false, "Stronger power saving mode"],
   ["global", "window_animation_scale", "0.5", false, "Window animations 0.5x"],
   ["global", "transition_animation_scale", "0.5", false, "Transition animations 0.5x"],
@@ -473,6 +490,31 @@ function nameOf(p) {
 const rowText = (p) => `${nameOf(p)} (${p})`;
 
 // ---------- battery tool (port of the script's battery section) ----------
+// Android refuses to switch power saving while the phone charges, and over USB it always charges.
+// So the charger is hidden from Android for a moment ("unplug" is only pretend, "reset" undoes it).
+const powerSaverCmd = (on) => `cmd battery unplug; cmd power set-mode ${on ? 1 : 0}; cmd battery reset`;
+// While charging, Android pauses power saving and remembers it as "sticky": it returns when unplugged.
+async function powerSavingOn() {
+  return (await sh("settings get global low_power; settings get global low_power_sticky")).split(/\s+/).slice(0, 2).includes("1");
+}
+// Level, temperature, health and estimated full capacity (mAh) from "dumpsys battery".
+function parseBattery(text) {
+  const num = (key) => { const m = text.match(new RegExp(`^\\s*${key}: (-?\\d+)`, "m")); return m ? Number(m[1]) : null; };
+  const level = num("level"), temp = num("temperature"), counter = num("Charge counter");
+  const health = { 1: "unknown", 2: "good", 3: "overheated", 4: "dead", 5: "over voltage", 6: "failed", 7: "cold" }[num("health")] || null;
+  // charge counter is what is in the battery now (uAh); below 20% the estimate gets too rough
+  const capacity = counter > 0 && level >= 20 ? Math.round(counter / 1000 * 100 / level) : null;
+  return { level, temp: temp === null ? null : temp / 10, health, capacity };
+}
+// [[uid, mAh]] biggest first, from the "Estimated power use" lines of "dumpsys batterystats".
+function parsePowerUse(text) {
+  const use = {};
+  for (const m of text.matchAll(/^\s+U(?:ID|id) (?:u0a(\d+)|(\d+)): ([\d.]+)/gm)) {
+    const uid = m[1] !== undefined ? String(10000 + Number(m[1])) : m[2];
+    use[uid] = (use[uid] || 0) + Number(m[3]);
+  }
+  return Object.entries(use).sort((a, b) => b[1] - a[1]);
+}
 async function readSettings() {
   return parseMarked(await sh(BATTERY_SETTINGS.map(([ns, key]) => `echo "#${ns}/${key}=$(settings get ${ns} ${key})"`).join("; ")));
 }
@@ -503,8 +545,7 @@ async function applySettings(backup) {
   }
   const night = await nightMode();
   if (night && night !== "yes") { backup.night_mode ??= night; commands.push("cmd uimode night yes"); }
-  const power = (await sh("settings get global low_power")).trim();
-  if (power !== "1") { backup.power_saver ??= power; commands.push("cmd power set-mode 1"); }
+  if (!(await powerSavingOn())) { backup.power_saver ??= "0"; commands.push(powerSaverCmd(true)); }
   saveBackup(backup);  // saved before changing anything, so RESTORE works even if this stops halfway
   await runAll(commands);
   const after = await readSettings();
@@ -534,7 +575,7 @@ async function applyDeepSleep(backup) {
     failed.forEach((k) => delete backup.device_config?.[k]);
     saveBackup(backup);
     log(`  Deep sleep: this phone does not allow changing the sleep timers over USB (${reason}).`);
-    if ((await sh("settings get global low_power")).trim() === "1") {
+    if (await powerSavingOn()) {
       log("  No problem: power saving with quick doze is on, so the phone still goes into deep sleep");
       log("  right after the screen turns off. Keep power saving on to keep that.");
     } else {
@@ -627,7 +668,7 @@ async function restoreAll() {
   for (const [key, old] of Object.entries(backup.device_config || {}))
     cmds.push(old === "null" ? `device_config delete device_idle ${key}` : `device_config put device_idle ${key} ${q(old)}`);
   if (backup.night_mode) cmds.push(`cmd uimode night ${q(backup.night_mode)}`);
-  if ("power_saver" in backup && backup.power_saver !== "1") cmds.push("cmd power set-mode 0");
+  if ("power_saver" in backup && backup.power_saver !== "1") cmds.push(powerSaverCmd(false));
   cmds.push(...(backup.data_allowed || []).map((u) => `cmd netpolicy remove restrict-background-whitelist ${u}`));
   cmds.push(...(backup.data_blocked || []).map((u) => `cmd netpolicy remove restrict-background-blacklist ${u}`));
   if (backup.data_saver === false) cmds.push("cmd netpolicy set restrict-background false");
@@ -1347,10 +1388,12 @@ async function maxBatteryUi(btn) {
 async function refreshStatus() {
   const ul = $("#statusList"), items = [];
   const add = (ok, text) => items.push([ok, text]);
-  const level = (await sh("dumpsys battery")).match(/level: (\d+)/);
-  const power = (await sh("settings get global low_power")).trim() === "1";
-  add(true, `Battery: ${level ? level[1] + "%" : "unknown"}`);
-  add(power, "Power saving on");
+  const batt = parseBattery(await sh("dumpsys battery"));
+  const power = await powerSavingOn();
+  $("#phoneBatt").textContent = batt.level === null ? "" : `· ${batt.level}%`;
+  add(true, "Battery: " + [batt.level === null ? "unknown" : batt.level + "%", batt.temp !== null && batt.temp.toFixed(1) + " °C",
+    batt.health && "health " + batt.health, batt.capacity && `about ${batt.capacity} mAh when full (estimate)`].filter(Boolean).join(" · "));
+  add(power, "Power saving on (paused while charging, back when unplugged)");
   add((await nightMode()) === "yes", "Dark mode on");
   add(await dataSaverOn(), "Background mobile data blocked");
   const doze = await readDoze();
@@ -1369,11 +1412,29 @@ async function refreshStatus() {
   ul.replaceChildren(...items.map(([ok, text]) => { const li = el("li"); li.append(el("span", ok ? "ok" : "no", ok ? "✓" : "○"), el("span", "", text)); return li; }));
 }
 
+let USE = [];
+async function renderUse() {
+  if (!appsLoaded) await loadApps();
+  const out = await sh("dumpsys batterystats --charged | grep -E '^ +U(ID|id) [u0-9a]+: [0-9.]+'");
+  const byUid = {};
+  for (const a of APPS) if (a.uid !== undefined) byUid[a.uid] ??= a;
+  USE = parsePowerUse(out).filter(([uid, mah]) => byUid[uid] && mah >= 0.1).slice(0, 12).map(([uid, mah]) => [byUid[uid], mah]);
+  const keep = currentKeep();
+  $("#useSelect").classList.toggle("hidden", !USE.length);
+  if (!USE.length) { $("#useList").textContent = "The phone has no battery use numbers yet. Use it off the charger for a while first."; return; }
+  $("#useList").replaceChildren(...USE.map(([a, mah]) => {
+    const row = el("div", "userow"), name = el("span", "name", a.name);
+    row.append(iconEl(a, 24), name, ...(keep.has(a.p) ? [el("span", "badge blue", "Keep")] : a.bgOff ? [el("span", "badge green", "Restricted")] : []),
+      el("span", "size", mah.toFixed(1) + " mAh"));
+    return row;
+  }));
+}
+
 // ---------- settings tab (applied with Apply) ----------
 async function renderSettings() {
   const box = $("#settingsRows");
   const now = await readSettings(), backup = loadBackup();
-  const power = (await sh("settings get global low_power")).trim() === "1";
+  const power = await powerSavingOn();
   const night = await nightMode();
   const st = stage($("#settingsCount"), $("#settingsApply"));
   const rows = [], switches = [];
@@ -1383,9 +1444,9 @@ async function renderSettings() {
     if (disabled) { s.input.disabled = true; s.title = "Was already like this before, so there is no older value to go back to"; }
     row.lastChild.replaceWith(s); rows.push(row); switches.push(s);
   };
-  add("power", "Power saving", "", power, async (v) => {
+  add("power", "Power saving", "Paused while the phone charges, back when unplugged", power, async (v) => {
     const b = loadBackup(); if (v && !("power_saver" in b)) { b.power_saver = "0"; saveBackup(b); }
-    return v ? "cmd power set-mode 1" : "cmd power set-mode 0";
+    return powerSaverCmd(v);
   });
   add("night", "Dark mode", "", night === "yes", async (v) => {
     const b = loadBackup(); if (v && !b.night_mode) { b.night_mode = night || "no"; saveBackup(b); }
@@ -2479,6 +2540,12 @@ function renderChips() {
 }
 renderChips();
 $("#search").oninput = renderApps;
+$("#useSelect").onclick = () => {
+  const keep = currentKeep();
+  selected = new Set(USE.map(([a]) => a.p).filter((p) => !keep.has(p)));
+  filter = "all"; renderChips(); showTab("apps");
+  toast("Selected. Pick \"Recommended normal\" and press Apply to restrict them.");
+};
 const drop = $("#drop");
 drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
 drop.ondragleave = () => drop.classList.remove("over");
@@ -2503,6 +2570,7 @@ const card = (id) => $("#res-" + id);
 const ACTIONS = {
   max: (b) => maxBatteryUi(b),
   status: (b) => runButton(b, refreshStatus),
+  use: (b) => runButton(b, renderUse),
   sleep: (b) => runButton(b, async () => { const ok = await applyDeepSleep(loadBackup()); await refreshStatus(); if (!ok) return "⚠ Not possible"; }, card("sleep")),
   restrict: async (b) => { const k = await ensureKeep(); if (k) await runButton(b, async () => { const ok = await restrictApps(k, loadBackup()); await refreshStatus(); await loadApps(); if (!ok) return "⚠ Partly done"; }, card("restrict")); },
   data: async (b) => { const k = await ensureKeep(); if (k) await runButton(b, async () => { const ok = await blockBackgroundData(k, loadBackup()); await refreshStatus(); if (!ok) return "⚠ Not possible"; }, card("data")); },
@@ -2523,14 +2591,15 @@ const ACTIONS = {
 document.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => Promise.resolve(ACTIONS[b.dataset.act](b)).catch(showError)));
 
 // ---------- connect ----------
-async function connect() {
+async function connect(known) {
   const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
   if (!manager) { await modal("Browser not supported", "This browser has no WebUSB. Use Chrome or Edge on a computer.", [["OK", "ok", "primary"]]); return; }
-  const device = await manager.requestDevice();
+  const device = known || await manager.requestDevice();
   if (!device) return;
   let connection;
   try { connection = await device.connect(); }
   catch (e) {
+    if (known) return;
     await modal("Could not open the phone", `${e.message}\n\nAnother program is using it. Close other ADB programs (run "adb kill-server"), unplug and replug the phone, reload this page and try again.`, [["OK", "ok", "primary"]]);
     return;
   }
@@ -2543,6 +2612,7 @@ async function connect() {
     // Close the USB connection, otherwise the next try waits forever.
     try { await connection.close?.(); } catch {}
     $("#phoneName").textContent = "Not connected";
+    if (known) return;
     await modal("Could not connect", `${e.message || e}\n\nUnplug and replug the phone, reload this page and try again.`, [["OK", "ok", "primary"]]);
     return;
   }
@@ -2556,26 +2626,30 @@ async function connect() {
     .split("\n").map((s) => s.trim()).filter((s) => s && s !== "null");
   const title = names[0] && names[0] !== model ? `${model} | ${names[0]}` : model;
   log("Connected phone: " + title);
+  const level = parseBattery(await sh("dumpsys battery")).level;
   setConnected(title);
+  $("#phoneBatt").textContent = level === null ? "" : `· ${level}%`;
 }
 function setConnected(title) {
   $("#dot").classList.toggle("on", !!adb);
   $("#phoneName").textContent = adb ? title : "Not connected";
   $("#phoneName").classList.toggle("muted", !adb);
+  if (!adb) $("#phoneBatt").textContent = "";
   $("#connectBtn").classList.toggle("hidden", !!adb);
   $("#disconnectBtn").classList.toggle("hidden", !adb);
   showTab(tab);
 }
 // One connect at a time: a second one while the first waits for "Allow" makes the USB device fail.
 let connecting = false;
-const tryConnect = async () => {
+const tryConnect = async (known) => {
   if (connecting || adb) return;
   connecting = true;
-  try { await connect(); } catch (e) { $("#phoneName").textContent = "Not connected"; showError(e); }
+  try { await connect(known); } catch (e) { $("#phoneName").textContent = "Not connected"; showError(e); }
   finally { connecting = false; }
 };
-$("#connectBtn").onclick = tryConnect;
-$("#connectBig").onclick = tryConnect;
+$("#connectBtn").onclick = () => tryConnect();
+$("#connectBig").onclick = () => tryConnect();
+AdbDaemonWebUsbDeviceManager.BROWSER?.getDevices?.()?.then((d) => { if (d.length === 1) tryConnect(d[0]); }).catch(() => {});
 $("#disconnectBtn").onclick = async () => { const a = adb; adb = null; appsLoaded = false; gateOpen = null; namesRun++; setConnected(""); await a?.close().catch(() => {}); };
 showTab("apps");
 
