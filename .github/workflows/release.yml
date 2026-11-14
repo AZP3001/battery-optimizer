@@ -17,7 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash -n battery-optimizer-linux.sh && ./battery-optimizer-linux.sh selfcheck
-      - run: gh release create "$TAG" --target "$GITHUB_SHA" battery-optimizer-linux.sh battery-optimizer-windows.bat --title "Battery Optimizer $TAG" --notes "Linux: download battery-optimizer-linux.sh, run chmod +x on it, then ./battery-optimizer-linux.sh battery. Windows: download battery-optimizer-windows.bat and battery-optimizer-linux.sh into the same folder and double-click the .bat. See the README for setup."
+      # Block scalar (|) so the colons in the notes are not read as YAML.
+      - run: |
+          gh release create "$TAG" --target "$GITHUB_SHA" battery-optimizer-linux.sh battery-optimizer-windows.bat --title "Battery Optimizer $TAG" --notes "Linux: download battery-optimizer-linux.sh, run chmod +x on it, then ./battery-optimizer-linux.sh battery. Windows: download battery-optimizer-windows.bat and battery-optimizer-linux.sh into the same folder and double-click the .bat. See the README for setup."
         env:
           TAG: ${{ inputs.version || github.ref_name }}
           GH_TOKEN: ${{ github.token }}
