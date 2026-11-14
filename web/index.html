@@ -100,8 +100,10 @@
   .side .seg { display:flex; width:100%; margin-top:8px; }
   .side .seg button { flex:1; padding:6px 4px; }
   .side select { width:100%; margin-top:8px; }
-  .presets { display:flex; gap:8px; margin:4px 0 8px; }
-  .presets .btn { flex:1; }
+  .presets { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:4px 0 8px; }
+  .presets .btn { padding:8px 10px; }
+  .presets .btn:last-child { grid-column:1 / -1; }
+  .presets .btn.chosen { border-color:var(--accent); background:var(--accent-soft); }
   .seg { display:inline-flex; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:2px; flex:none; }
   .seg button { background:none; border:0; padding:4px 9px; border-radius:6px; font-size:12px; color:var(--muted); cursor:pointer; }
   .seg button[aria-pressed="true"] { background:var(--surface2); color:var(--text); }
@@ -944,14 +946,30 @@ function renderSide() {
   const stop = el("input"); stop.type = "checkbox"; stop.id = "stopAfter";
   const stopLabel = el("label", "small"); stopLabel.htmlFor = "stopAfter"; stopLabel.append(stop, " Close the apps after applying (force stop)");
   stopLabel.style.cssText = "display:flex;gap:8px;align-items:center;margin-top:12px";
-  const preset = (label, title, f) => { const b = el("button", "btn", label); b.title = title; b.onclick = f; return b; };
+  // Presets only fill in the choices below; nothing changes until Apply.
+  // [label, help, {bg, boot, wake, data, notif, bucket, keep, stop}] ("" = No change)
+  const PRESETS = [
+    ["Allow all", "Everything allowed, Active bucket",
+      { bg: "allow", boot: "allow", wake: "allow", data: "allow", notif: "allow", bucket: "active", keep: "", stop: false }],
+    ["Block all", "Everything blocked, Restricted bucket, off the keep list, closed",
+      { bg: "block", boot: "block", wake: "block", data: "block", notif: "block", bucket: "restricted", keep: "remove", stop: true }],
+    ["Recommended normal", "For apps you only use when you open them: no background, boot, wake locks or background data; Restricted; closed",
+      { bg: "block", boot: "block", wake: "block", data: "block", notif: "", bucket: "restricted", keep: "remove", stop: true }],
+    ["Recommended chat", "For messengers: background, boot, wake locks, background data and notifications allowed; Active; on the keep list",
+      { bg: "allow", boot: "allow", wake: "allow", data: "allow", notif: "allow", bucket: "active", keep: "add", stop: false }],
+  ];
   const presets = el("div", "presets");
-  presets.append(
-    preset("Optimize", "Block background, start at boot and wake locks, Restricted bucket, close them",
-      () => { ["bg", "boot", "wake"].forEach((k) => segs[k].set("block")); bucket.value = "restricted"; stop.checked = true; }),
-    preset("Unoptimize", "Allow everything again, Active bucket",
-      () => { ["bg", "boot", "wake"].forEach((k) => segs[k].set("allow")); bucket.value = "active"; stop.checked = false; }),
-    preset("Reset", "Back to No change", () => renderSide()));
+  for (const [label, title, v] of PRESETS) {
+    const b = el("button", "btn", label); b.title = title;
+    b.onclick = () => {
+      for (const c of CONTROLS) segs[c.key].set(v[c.key]);
+      bucket.value = v.bucket; keepSeg.set(v.keep); appSeg.set(""); stop.checked = v.stop;
+      presets.querySelectorAll(".btn").forEach((o) => o.classList.toggle("chosen", o === b));
+    };
+    presets.append(b);
+  }
+  const reset = el("button", "btn", "Reset"); reset.title = "Back to No change"; reset.onclick = () => renderSide();
+  presets.append(reset);
   const apply = el("button", "btn primary big", `Apply to ${n} app${n > 1 ? "s" : ""}`);
   apply.style.cssText = "width:100%;margin-top:16px";
   apply.onclick = () => {
