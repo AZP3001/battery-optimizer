@@ -2445,10 +2445,19 @@ def parse_display(text):
     return (int(size[1]), int(size[2]), int(dens[1]), int(over[1]) if over else None) if size and dens else None
 
 
-def scaled_display(w, h, d, factor):
-    """Smaller resolution with the same proportions; density shrinks too so everything keeps its size."""
-    half_up = lambda x: int(x + 0.5)   # like the website (Python's round() rounds halves to even)
-    return half_up(w * factor / 2) * 2, half_up(h * factor / 2) * 2, half_up(d * factor)
+def display_sizes(w, h, modes):
+    """The resolutions the phone's own selector offers, biggest first: [(width, height), ...].
+    They come from the screen's supported modes ("dumpsys display"); no made-up sizes."""
+    sizes = {w: h}
+    for a, b in re.findall(r"width=(\d+), height=(\d+)", modes):
+        mw, mh = sorted((int(a), int(b)))
+        if mw <= w:
+            sizes[mw] = mh
+    # Samsung scales in software and reports one mode; its selector offers FHD+ and HD+ on 1440-wide screens.
+    if len(sizes) == 1 and w == 1440:
+        for mw in (1080, 720):
+            sizes[mw] = int(h * mw / w / 2 + 0.5) * 2
+    return sorted(sizes.items(), reverse=True)
 
 
 def extras_menu(backup):
@@ -2469,7 +2478,7 @@ def extras_menu(backup):
             acts.append("tele")
         if disp:
             now = f"{disp[3]} wide" if disp[3] else "native"
-            rows.append(f"      Screen resolution: {now} (lower = less work for the graphics chip)")
+            rows.append(f"      Screen resolution: {now} (pick one of the resolutions the phone offers)")
             acts.append("res")
         if charge in ("0", "1"):
             rows.append(f"[{'ON ' if charge == '1' else 'OFF'}] Limit charging to 85% (Samsung): longer battery lifespan, less runtime per charge")
@@ -2507,15 +2516,22 @@ def extras_menu(backup):
             save_json(BACKUP_FILE, backup)
         elif act == "res":
             w, h, d, _ = disp
-            sizes = [(1, "Native"), (0.75, "75%"), (0.5, "50% (lowest)")]
-            pickd = pick("Resolution", [f"{name}: {scaled_display(w, h, d, f)[0]}x{scaled_display(w, h, d, f)[1]}" for f, name in sizes],
-                         "Enter = set | Esc = back")
+            sizes = display_sizes(w, h, adb("dumpsys display | grep -i supportedModes")[1])
+            if len(sizes) == 1:
+                print(f"  This phone offers only one resolution ({w}x{h}).")
+                if disp[3]:
+                    adb("wm size reset; wm density reset")   # a custom size from an older version
+                    print("  A custom size from an older version was active: the native one is back.")
+                continue
+            names = {720: "HD+ ", 1080: "FHD+ ", 1440: "WQHD+ "}
+            pickd = pick("Resolution", [f"{names.get(sw, '')}{sw}x{sh_}{' (native)' if sw == w else ''}" for sw, sh_ in sizes],
+                         "The resolutions this phone offers | Enter = set | Esc = back")
             if pickd:
-                f = sizes[pickd[0]][0]
-                sw, sh_, sd = scaled_display(w, h, d, f)
+                sw, sh_ = sizes[pickd[0]]
                 backup["resolution"] = True
                 save_json(BACKUP_FILE, backup)
-                adb("wm size reset; wm density reset" if f == 1 else f"wm size {sw}x{sh_}; wm density {sd}")
+                # density shrinks with the width so text and icons keep their size
+                adb("wm size reset; wm density reset" if sw == w else f"wm size {sw}x{sh_}; wm density {int(d * sw / w + 0.5)}")
         elif act == "charge":
             saved = backup.setdefault("settings", {})
             if charge == "1":
@@ -2843,8 +2859,11 @@ def self_check():
     assert set_5g("1" * 32, False) == "1" * 12 + "0" + "1" * 19
     shown = "Physical size: 1080x2412\nOverride size: 810x1809\nPhysical density: 420\nOverride density: 315\n"
     assert parse_display(shown) == (1080, 2412, 420, 810) and parse_display("Physical size: 1080x2412\nPhysical density: 420\n")[3] is None
-    assert parse_display("error") is None and scaled_display(1080, 2412, 420, 0.75) == (810, 1810, 315)
-    assert scaled_display(1080, 2412, 420, 0.5) == (540, 1206, 210)
+    assert parse_display("error") is None
+    modes = "mSupportedModes=[{id=1, width=1440, height=3120, fps=120.0}, {id=2, width=1080, height=2340, fps=120.0}, {id=3, width=1080, height=2340, fps=60.0}]"
+    assert display_sizes(1440, 3120, modes) == [(1440, 3120), (1080, 2340)]
+    assert display_sizes(1080, 2412, "supportedModes [{id=1, width=1080, height=2412, fps=60.0}]") == [(1080, 2412)]
+    assert display_sizes(1440, 3088, "") == [(1440, 3088), (1080, 2316), (720, 1544)]
     assert fmt_size(999) == "999 B" and fmt_size(1500) == "1.5 KB" and fmt_size(250_000_000) == "250 MB"
     print("self-check ok")
 

@@ -337,7 +337,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.6</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.7</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -512,8 +512,19 @@ function parseDisplay(text) {
   const size = text.match(/Physical size: (\d+)x(\d+)/), dens = text.match(/Physical density: (\d+)/), over = text.match(/Override size: (\d+)x/);
   return size && dens ? { w: Number(size[1]), h: Number(size[2]), d: Number(dens[1]), over: over ? Number(over[1]) : null } : null;
 }
-// Smaller resolution with the same proportions; density shrinks too so everything keeps its size.
-const scaledDisplay = ({ w, h, d }, f) => [Math.round(w * f / 2) * 2, Math.round(h * f / 2) * 2, Math.round(d * f)];
+// The resolutions the phone's own selector offers, biggest first: [[width, height], ...].
+// They come from the screen's supported modes ("dumpsys display"); no made-up sizes.
+function displaySizes(disp, modes) {
+  const sizes = new Map([[disp.w, disp.h]]);
+  for (const m of modes.matchAll(/width=(\d+), height=(\d+)/g)) {
+    const w = Math.min(m[1], m[2]), h = Math.max(m[1], m[2]);
+    if (w <= disp.w) sizes.set(w, h);
+  }
+  // Samsung scales in software and reports one mode; its selector offers FHD+ and HD+ on 1440-wide screens.
+  if (sizes.size === 1 && disp.w === 1440) for (const w of [1080, 720]) sizes.set(w, Math.round(disp.h * w / disp.w / 2) * 2);
+  return [...sizes].sort((a, b) => b[0] - a[0]);
+}
+const sizeName = (w) => ({ 720: "HD+", 1080: "FHD+", 1440: "WQHD+" }[w] || "");
 // Preinstalled apps most people never asked for (only apps you did not install yourself count).
 const BLOAT = /^com\.(netflix|facebook|linkedin|spotify|zhiliaoapp|ss\.android\.ugc|booking|amazon\.|king\.|microsoft\.(skydrive|appmanager|office)|hiya|opera|snapchat|dti\.|aura\.|ironsource|digitalturbine|samsung\.android\.(game\.gamehome|bixby|arzone|aremoji|stickercenter|kidsinstaller|app\.spage|tvplus)|sec\.android\.app\.(samsungapps|kidshome)|nothing\.(experience|userguide)|google\.android\.(apps\.(youtube\.music|tachyon|subscriptions\.red|magazines|podcasts)|videos))/;
 
@@ -1545,18 +1556,24 @@ async function renderSettings() {
   if (charge === "0" || charge === "1")
     addSetting(["global", "protect_battery", "1", true, "Limit charging to 85% (Samsung): longer battery lifespan, less runtime per charge"], charge);
   const disp = parseDisplay(await sh("wm size; wm density"));
-  if (disp) {
-    const sel = el("select"), sizes = [[1, "Native"], [0.75, "75%"], [0.5, "50% (lowest)"]];
-    sel.append(...sizes.map(([f, name]) => new Option(`${name}: ${scaledDisplay(disp, f)[0]}x${scaledDisplay(disp, f)[1]}`, f)));
-    const cur = String(sizes.map(([f]) => f).sort((a, b) => Math.abs((disp.over || disp.w) / disp.w - a) - Math.abs((disp.over || disp.w) / disp.w - b))[0]);
+  const sizes = disp ? displaySizes(disp, await sh("dumpsys display | grep -i supportedModes")) : [];
+  if (sizes.length > 1) {
+    const sel = el("select");
+    sel.append(...sizes.map(([w, h]) => new Option(`${sizeName(w)} ${w}x${h}${w === disp.w ? " (native)" : ""}`.trim(), w)));
+    // a size set by an older version of this tool is not in the list: it shows as native until changed
+    const cur = String(sizes.some(([w]) => w === disp.over) ? disp.over : disp.w);
     sel.value = cur; sel.setAttribute("aria-label", "Screen resolution");
-    const row = settingRow("Screen resolution", "Lower = less work for the graphics chip. Text and icons keep their size.", sel);
+    const row = settingRow("Screen resolution", "The resolutions this phone offers. Lower = less work for the graphics chip.", sel);
     sel.onchange = () => st.mark("resolution", row, sel.value !== cur, async () => {
       const b = loadBackup(); b.resolution = true; saveBackup(b);
-      const [w, h, d] = scaledDisplay(disp, Number(sel.value));
-      return sel.value === "1" ? "wm size reset; wm density reset" : `wm size ${w}x${h}; wm density ${d}`;
+      const [w, h] = sizes.find(([x]) => String(x) === sel.value);
+      // density shrinks with the width so text and icons keep their size
+      return w === disp.w ? "wm size reset; wm density reset" : `wm size ${w}x${h}; wm density ${Math.round(disp.d * w / disp.w)}`;
     });
     rows.push(row);
+  } else if (disp) {
+    rows.push(el("p", "muted small", `Screen resolution: this phone offers only one (${disp.w}x${disp.h}).` +
+      (disp.over ? " A custom size from an older version is active: RESTORE in the Battery tab puts the native one back." : "")));
   }
   rows.push(el("p", "muted small", "Account sync cannot be switched off over USB: Android has no command for it. Restricted apps already sync far less."));
   box.replaceChildren(...rows);
