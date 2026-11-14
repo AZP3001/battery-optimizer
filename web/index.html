@@ -149,6 +149,7 @@
     background:var(--surface2); border:1px solid var(--line); border-radius:var(--radius); padding:12px 16px; box-shadow:0 8px 30px rgba(0,0,0,.4); }
   .btn.done { background:var(--green); border-color:var(--green); color:#fff; }
   .btn.failed { background:var(--red); border-color:var(--red); color:#fff; }
+  .btn.warn { background:var(--amber); border-color:var(--amber); color:#111; }
   .btn .spinner { width:14px; height:14px; border-color:rgba(255,255,255,.35); border-top-color:#fff; margin-right:8px; }
   .result { margin-top:12px; font-size:13px; color:var(--muted); white-space:pre-wrap; }
   .result:empty { display:none; }
@@ -468,6 +469,7 @@ async function applySettings(backup) {
   log(`  Settings: ${BATTERY_SETTINGS.length - missing.length - failed.length} set, dark mode and power saving on.`);
   failed.forEach((w) => log("  FAILED: " + w));
   if (missing.length) log("  Not on this phone (skipped): " + missing.join(", "));
+  return !failed.length;
 }
 
 async function applyDeepSleep(backup) {
@@ -489,12 +491,19 @@ async function applyDeepSleep(backup) {
     failed.forEach((k) => delete backup.device_config?.[k]);
     saveBackup(backup);
     log(`  Deep sleep: this phone does not allow changing the sleep timers over USB (${reason}).`);
-    log("  No problem: power saving with quick doze is on, so the phone still goes into deep sleep");
-    log("  right after the screen turns off. Keep power saving on to keep that.");
+    if ((await sh("settings get global low_power")).trim() === "1") {
+      log("  No problem: power saving with quick doze is on, so the phone still goes into deep sleep");
+      log("  right after the screen turns off. Keep power saving on to keep that.");
+    } else {
+      log("  Turn on Power saving instead (Settings tab, or MAX BATTERY): its quick doze puts the phone");
+      log("  into deep sleep right after the screen turns off.");
+    }
+    return false;
   } else {
     log("  Deep sleep: the phone now sleeps about 30 seconds after the screen turns off.");
     log("  Apps not on the keep list may show messages a few minutes late while the screen is off.");
   }
+  return true;
 }
 
 async function restrictedNow() {
@@ -528,6 +537,7 @@ async function restrictApps(keep, backup) {
   const done = targets.filter((p) => now.has(p)).length;
   log(`  Apps: ${done} of ${targets.length} restricted, ${kept.length} on the keep list left free.`);
   if (done < targets.length) log(`  ${targets.length - done} refused the restriction (usually system parts that do not allow it).`);
+  return done === targets.length;
 }
 
 async function packageUids() { return Object.fromEntries([...(await sh("pm list packages -U")).matchAll(/^package:(\S+) uid:(\d+)/gm)].map((m) => [m[1], m[2]])); }
@@ -545,11 +555,13 @@ async function blockBackgroundData(keep, backup) {
   await runAll([...fresh.map((u) => `cmd netpolicy add restrict-background-whitelist ${u}`), "cmd netpolicy set restrict-background true"]);
   const white2 = await uidList("whitelist");
   const missing = [...allow].filter((u) => !white2.has(u)).length;
-  if (await dataSaverOn()) {
+  const saverOn = await dataSaverOn();
+  if (saverOn) {
     log(`  Mobile data: no app uses mobile data in the background now, except ${allow.size - missing} kept ones.`);
     log("  Wi-Fi is not affected. Hotspot may not work while Data Saver is on.");
   } else log("  Mobile data: FAILED, Data Saver did not turn on.");
-  if (missing) log(`  ${missing} kept apps could not be allowed. Check them under Mobile data per app.`);
+  if (missing) log(`  ${missing} kept apps could not be allowed. Check them in the Apps tab (gear, Background mobile data).`);
+  return saverOn && !missing;
 }
 
 async function restoreAll() {
@@ -582,28 +594,31 @@ function queue(fn) { const run = queueTail.then(fn); queueTail = run.catch(() =>
 let sink = null;   // while a button runs, its log lines are also collected for its result box
 
 // Runs fn(setText) for a button: spinner and progress text on the button, then "✓ Done" or "✗ Failed".
-// fn may return false for "cancelled" (the button just goes back to normal).
+// fn may return false for "cancelled" (the button just goes back to normal), or a text starting with "⚠"
+// when it ran but could not do everything (shown in amber instead of "Done").
 async function runButton(btn, fn, resultEl) {
   if (btn.dataset.running) return;
   const label = (btn.dataset.label ??= btn.textContent);
-  btn.dataset.running = "1"; btn.disabled = true; btn.classList.remove("done", "failed");
+  btn.dataset.running = "1"; btn.disabled = true; btn.classList.remove("done", "failed", "warn");
   const set = (t) => { btn.replaceChildren(el("span", "spinner"), document.createTextNode(t)); };
   set("Waiting...");
   const lines = [];
-  let state = "done";
+  let state = "done", warnText = "";
   try {
     const r = await queue(async () => {
       set("Working..."); sink = lines;
       try { return await fn(set); } finally { sink = null; }
     });
     if (r === false) state = "cancel";
+    else if (typeof r === "string" && r.startsWith("⚠")) { state = "warn"; warnText = r; }
   } catch (e) { showError(e); lines.push("Error: " + (e?.message || e)); state = "failed"; }
   if (resultEl) resultEl.textContent = lines.join("\n").trim();
   btn.disabled = false; delete btn.dataset.running;
   if (state === "cancel") { btn.textContent = label; return; }
-  btn.textContent = state === "done" ? "✓ Done" : "✗ Failed";
+  btn.textContent = state === "done" ? "✓ Done" : state === "warn" ? warnText : "✗ Failed";
   btn.classList.add(state);
-  setTimeout(() => { if (!btn.dataset.running) { btn.textContent = label; btn.classList.remove("done", "failed"); } }, 3000);
+  // Problems stay visible longer than "Done".
+  setTimeout(() => { if (!btn.dataset.running) { btn.textContent = label; btn.classList.remove("done", "failed", "warn"); } }, state === "done" ? 3000 : 8000);
 }
 
 // ---------- small UI helpers ----------
@@ -784,6 +799,9 @@ const FILTERS = [["all", "All"], ["user", "Your apps"], ["extra", "Preinstalled"
 // Per-app switches. ops = app-ops set to allow / ignore.
 const CONTROLS = [
   { key: "bg", label: "Run in background", help: "Off = sleeps until you open it", ops: ["RUN_ANY_IN_BACKGROUND", "RUN_IN_BACKGROUND"] },
+  // Autostart, like the script: Android 13+ stops boot delivery to apps that may not run in the background, and USB
+  // debugging may not switch off single boot receivers, so this one app-op is the switch. Only apps that start at boot get it.
+  { key: "boot", label: "Start at boot", help: "Blocking also stops background running (same Android switch)", ops: ["RUN_ANY_IN_BACKGROUND"], bootOnly: true },
   { key: "wake", label: "Keep the phone awake", help: "Wake locks", ops: ["WAKE_LOCK"] },
   { key: "fg", label: "Foreground services", help: "Off can make some apps crash", ops: ["START_FOREGROUND"] },
   { key: "data", label: "Background mobile data", help: "Wi-Fi is not affected" },
@@ -898,7 +916,8 @@ function renderSide() {
   }
   const ABS = [["", "No change"], ["allow", "Allow"], ["block", "Block"]];
   const segs = {};
-  const rows = CONTROLS.map((c) => settingRow(c.label, c.help, (segs[c.key] = seg(ABS, ""))));
+  const bootCount = APPS.filter((a) => selected.has(a.p) && a.boot).length;
+  const rows = CONTROLS.map((c) => settingRow(c.label, c.bootOnly ? `${bootCount} of the selected apps start at boot. ${c.help}` : c.help, (segs[c.key] = seg(ABS, ""))));
   const bucket = el("select"); bucket.append(new Option("No change", ""), ...BUCKETS.map(([v, l]) => new Option(l, v)));
   const keepSeg = seg([["", "No change"], ["add", "Add"], ["remove", "Remove"]], "");
   const appSeg = seg([["", "No change"], ["enable", "Enable"], ["disable", "Disable"]], "");
@@ -909,9 +928,9 @@ function renderSide() {
   const presets = el("div", "presets");
   presets.append(
     preset("Optimize", "Block background, wake locks and foreground services, Restricted bucket, close them",
-      () => { ["bg", "wake", "fg"].forEach((k) => segs[k].set("block")); bucket.value = "restricted"; stop.checked = true; }),
+      () => { ["bg", "boot", "wake", "fg"].forEach((k) => segs[k].set("block")); bucket.value = "restricted"; stop.checked = true; }),
     preset("Unoptimize", "Allow everything again, Active bucket",
-      () => { ["bg", "wake", "fg"].forEach((k) => segs[k].set("allow")); bucket.value = "active"; stop.checked = false; }),
+      () => { ["bg", "boot", "wake", "fg"].forEach((k) => segs[k].set("allow")); bucket.value = "active"; stop.checked = false; }),
     preset("Reset", "Back to No change", () => renderSide()));
   const apply = el("button", "btn primary big", `Apply to ${n} app${n > 1 ? "s" : ""}`);
   apply.style.cssText = "width:100%;margin-top:16px";
@@ -933,7 +952,7 @@ function renderSide() {
 function commandsFor(a, want) {
   const p = q(a.p), cmds = [];
   for (const c of CONTROLS) {
-    if (!want[c.key] || !c.ops) continue;
+    if (!want[c.key] || !c.ops || (c.bootOnly && !a.boot)) continue;
     for (const op of c.ops) cmds.push(`cmd appops set ${p} ${op} ${want[c.key] === "allow" ? "allow" : "ignore"}`);
   }
   if (want.notif === "block") cmds.push(`pm revoke --user 0 ${p} android.permission.POST_NOTIFICATIONS >/dev/null 2>&1`, `cmd appops set ${p} POST_NOTIFICATION ignore`);
@@ -983,7 +1002,7 @@ async function appSettings(a) {
   const d = $("#modal");
   d.replaceChildren(el("h2", "", a.name), el("div", "muted small", a.p), el("div", "empty", "Loading..."));
   d.onclose = null;
-  d.showModal();
+  if (!d.open) d.showModal();
   const [opsOut, blocked, bucketOut, dump] = await queue(async () => [
     await sh(`cmd appops get ${q(a.p)}`), await uidList("blacklist"), await sh(`am get-standby-bucket ${q(a.p)}`), await sh(`dumpsys package ${q(a.p)}`)]);
   const ops = Object.fromEntries([...opsOut.matchAll(/^\s*(\w+): (\w+)/gm)].map((m) => [m[1], m[2]]));
@@ -1002,6 +1021,7 @@ async function appSettings(a) {
     row.lastChild.replaceWith(s); rows.push(row); return s;
   };
   for (const c of CONTROLS) {
+    if (c.bootOnly && !a.boot) continue;
     let on;
     if (c.ops) on = c.ops.every(isOn);
     else if (c.key === "data") { if (a.uid === undefined) continue; on = !blocked.has(a.uid); }
@@ -1032,7 +1052,6 @@ async function appSettings(a) {
     (v) => [v ? `pm enable --user 0 ${q(a.p)}` : `pm disable-user --user 0 ${q(a.p)}`]);
   const keepNow = currentKeep().has(a.p);
   sw("keep", "Keep list", "Never restricted by MAX BATTERY", keepNow, (v) => { const k = currentKeep(); v ? k.add(a.p) : k.delete(a.p); saveKeep(k); renderKeepInfo(); return []; });
-  if (a.boot) rows.push(el("p", "muted small", "This app starts when the phone boots. Turning off \"Run in background\" blocks that too."));
 
   // One-off actions: these run when clicked, after a confirmation.
   const action = (label, cls, question, cmd) => {
@@ -1048,6 +1067,7 @@ async function appSettings(a) {
     action("Clear data", "danger", `Erase all data of ${a.name} (sign-ins, settings, files). It stays installed.`, `pm clear ${q(a.p)}`));
   if (a.tier === 1) actions.append(action("Uninstall", "danger", `Remove ${a.name} from the phone.`, `pm uninstall ${q(a.p)}`));
 
+  // After Apply the window reads the phone again, because "Start at boot" and "Run in background" share a switch.
   apply.onclick = () => runButton(apply, async (set) => {
     const cmds = [];
     for (const f of st.changes.values()) cmds.push(...f());
@@ -1058,6 +1078,7 @@ async function appSettings(a) {
     bucketName = bucket.value;
     d.querySelectorAll(".changed").forEach((r) => r.classList.remove("changed"));
     st.clear();
+    setTimeout(() => { if (d.open && !st.changes.size) appSettings(a).catch(showError); }, 1500);
   });
   const close = el("button", "btn", "Close");
   close.onclick = async () => {
@@ -1231,13 +1252,15 @@ async function maxBatteryUi(btn) {
     [["Cancel", ""], ["Start", "ok", "primary"]], dl) !== "ok") return;
   await runButton(btn, async (set) => {
     const backup = loadBackup();
-    set("1/4 Settings..."); await applySettings(backup);
+    // Deep sleep timers are not counted: phones that refuse them still get quick doze from power saving.
+    set("1/4 Settings..."); let ok = await applySettings(backup);
     set("2/4 Deep sleep..."); await applyDeepSleep(backup);
-    set("3/4 Apps..."); await restrictApps(keep, backup);
+    set("3/4 Apps..."); ok = (await restrictApps(keep, backup)) && ok;
     set("4/4 Mobile data...");
-    if (data.checked) await blockBackgroundData(keep, backup); else log("  Background mobile data: skipped.");
-    log("Done. Restart the phone once so the app freezer turns on.");
+    if (data.checked) ok = (await blockBackgroundData(keep, backup)) && ok; else log("  Background mobile data: skipped.");
+    log(ok ? "Done. Restart the phone once so the app freezer turns on." : "Partly done: see the lines above. Restart the phone once so the app freezer turns on.");
     set("Checking..."); await refreshStatus(); await loadApps();
+    if (!ok) return "⚠ Partly done";
   }, $("#res-max"));
 }
 
@@ -1397,9 +1420,9 @@ const card = (id) => $("#res-" + id);
 const ACTIONS = {
   max: (b) => maxBatteryUi(b),
   status: (b) => runButton(b, refreshStatus),
-  sleep: (b) => runButton(b, async () => { await applyDeepSleep(loadBackup()); await refreshStatus(); }, card("sleep")),
-  restrict: async (b) => { const k = await ensureKeep(); if (k) await runButton(b, async () => { await restrictApps(k, loadBackup()); await refreshStatus(); await loadApps(); }, card("restrict")); },
-  data: async (b) => { const k = await ensureKeep(); if (k) await runButton(b, async () => { await blockBackgroundData(k, loadBackup()); await refreshStatus(); }, card("data")); },
+  sleep: (b) => runButton(b, async () => { const ok = await applyDeepSleep(loadBackup()); await refreshStatus(); if (!ok) return "⚠ Not possible"; }, card("sleep")),
+  restrict: async (b) => { const k = await ensureKeep(); if (k) await runButton(b, async () => { const ok = await restrictApps(k, loadBackup()); await refreshStatus(); await loadApps(); if (!ok) return "⚠ Partly done"; }, card("restrict")); },
+  data: async (b) => { const k = await ensureKeep(); if (k) await runButton(b, async () => { const ok = await blockBackgroundData(k, loadBackup()); await refreshStatus(); if (!ok) return "⚠ Not possible"; }, card("data")); },
   restore: async (b) => {
     if (!Object.keys(loadBackup()).length) { card("restore").textContent = "Nothing to restore: the Battery tool has not changed this phone from this browser."; return; }
     if (await modal("Restore everything?", "Undo everything the Battery tool changed on this phone. Apps you changed by hand in the Apps tab stay as they are.",

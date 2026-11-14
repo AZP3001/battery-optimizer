@@ -1963,8 +1963,12 @@ def apply_deep_sleep(backup):
             backup.get("device_config", {}).pop(k, None)
         save_json(BACKUP_FILE, backup)
         print(f"  Deep sleep: this phone does not allow changing the sleep timers over USB ({reason}).")
-        print("  No problem: power saving with quick doze is on, so the phone still goes into deep sleep")
-        print("  right after the screen turns off. Keep power saving on to keep that.")
+        if adb("settings get global low_power")[1].strip() == "1":
+            print("  No problem: power saving with quick doze is on, so the phone still goes into deep sleep")
+            print("  right after the screen turns off. Keep power saving on to keep that.")
+        else:
+            print("  Turn on power saving instead (Settings in this menu, or MAX BATTERY): its quick doze puts")
+            print("  the phone into deep sleep right after the screen turns off.")
     else:
         print("  Deep sleep: the phone now sleeps about 30 seconds after the screen turns off.")
         print("  Apps not on the keep list may show messages a few minutes late while the screen is off.")
