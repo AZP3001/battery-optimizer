@@ -4,7 +4,7 @@
 
 No root needed. No app to install on the phone. One script, one menu.
 
-> 🌐 **Try it in the browser:** https://azp3001.github.io/battery-optimizer/
+> 🌐 **Try it in the browser:** https://azp3001.github.io/battery-optimizer/web/
 > ⚠️ The website is **experimental** and **not recommended over the scripts yet**. It only has the Battery, Optimize and Autostart tools, and it has not been tested as much. For now, use the Linux script or the Windows file below.
 
 ## What it does, in plain words
