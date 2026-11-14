@@ -10,6 +10,7 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 20   # a stuck download must not hold the job for hours; the old list simply stays
     steps:
       - uses: actions/checkout@v4
       - run: python3 .github/scripts/fdroid_index.py web/fdroid.json
