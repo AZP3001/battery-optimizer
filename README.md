@@ -2,8 +2,6 @@
 
 ADB-based battery optimizer and cleanup tool for Android. Runs from Linux, Windows or the browser over USB debugging. No root, nothing installed on the phone.
 
-## [Open the web app →](https://azp3001.github.io/battery-optimizer/web/)
-
 **https://azp3001.github.io/battery-optimizer/web/** · Chrome or Edge (WebUSB) · nothing to install
 
 ## Features
