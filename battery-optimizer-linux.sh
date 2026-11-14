@@ -51,7 +51,10 @@ phonehelp() {
                diagnostics apps off, lower screen resolution, and on Samsung
                a charge limit of 85% for a longer battery lifespan.
                Battery use: the apps that used the most battery since the
-               last full charge, biggest first. Enter restricts them.
+               last full charge, biggest first. Enter restricts them. Also
+               shows screen-on time and what keeps the phone awake right
+               now, and can start a new measurement.
+               Sleep now: screen off and straight into deep sleep.
                Status: what is applied right now, plus battery temperature,
                health and estimated capacity.
                RESTORE: undo everything the Battery tool changed.
@@ -2046,6 +2049,13 @@ BATTERY_SETTINGS = [
     ("secure", "send_action_app_error", "0", False, "Send app error reports: off"),
     ("system", "samsung_errorlog_agree", "0", True, "Samsung diagnostic data: off"),
     ("global", "wifi_verbose_logging_enabled", "0", False, "Wi-Fi verbose logging: off"),
+    ("global", "stay_on_while_plugged_in", "0", False, "Screen stays on while charging: off"),
+    ("global", "network_recommendations_enabled", "0", False, "Network recommendations: off"),
+    ("secure", "charging_sounds_enabled", "0", False, "Charging sound: off"),
+    ("secure", "charging_vibration_enabled", "0", False, "Charging vibration: off"),
+    ("secure", "screensaver_activate_on_dock", "0", False, "Screen saver when docked: off"),
+    ("secure", "screensaver_activate_on_sleep", "0", False, "Screen saver while charging: off"),
+    ("system", "notification_light_pulse", "0", False, "Notification light: off"),
     ("global", "battery_saver_constants", SAVER_CONSTANTS, False, "Stronger power saving mode"),
     ("global", "window_animation_scale", "0.5", False, "Window animations 0.5x"),
     ("global", "transition_animation_scale", "0.5", False, "Transition animations 0.5x"),
@@ -2157,6 +2167,22 @@ def battery_line(text):
     if b["capacity"]:
         parts.append(f"about {b['capacity']} mAh when full (estimate)")
     return ", ".join(parts)
+
+
+THERMAL = {"0": "normal", "1": "light heat", "2": "moderate heat", "3": "severe heat", "4": "critical heat",
+           "5": "emergency", "6": "shutdown"}
+
+
+def parse_wake_locks(text):
+    """[(uid, tag)] of the wake locks held right now, from "dumpsys power". A wake lock keeps the processor awake.
+    When a system service holds it for an app, the app's uid is in "WorkSource{...}" and wins."""
+    locks = []
+    for line in text.splitlines():
+        m = re.search(r"PARTIAL_WAKE_LOCK\s+'([^']*)'.*?\(uid=(\d+)", line)
+        if m:
+            ws = re.search(r"WorkSource\{(\d+)", line)
+            locks.append((ws[1] if ws else m[2], m[1]))
+    return locks
 
 
 def parse_power_use(text):
@@ -2549,6 +2575,14 @@ def battery_use_menu(backup):
     for package, uid in sorted(package_uids().items()):
         by_uid.setdefault(uid, package)
     use = [(by_uid[uid], mah) for uid, mah in parse_power_use(out) if uid in by_uid and mah >= 0.1]
+    screen = re.search(r"Screen on: (.*?) \(", adb("dumpsys batterystats --charged | grep -m1 'Screen on:'")[1])
+    if screen:
+        print(f"Screen on since the last full charge: {re.sub(r' ?[0-9]+ms', '', screen[1])}")
+    locks = parse_wake_locks(adb("dumpsys power | grep WAKE_LOCK")[1])
+    if locks:
+        print("Keeping the phone awake right now:")
+        for uid, tag in locks[:10]:
+            print(f"  {by_uid.get(uid, 'Android system')} ({tag})")
     if not use:
         print("The phone has no battery use numbers yet. Use it off the charger for a while first.")
         return
@@ -2559,11 +2593,15 @@ def battery_use_menu(backup):
         restricted = restricted_now()
         rows = [f"{mah:8.1f} mAh  {'[KEEP] ' if p in keep else '[restricted] ' if p in restricted else ''}{labels.get(p) or p} ({p})"
                 for p, mah in use]
-        chosen = pick("Battery use since the last full charge", rows,
+        chosen = pick("Battery use since the last full charge", ["[ START A NEW MEASUREMENT: forget the numbers so far ]"] + rows,
                       "Biggest first | Enter = restrict | Tab = select several | Esc = back", multi=True)
         if not chosen:
             return
-        picked = [use[i][0] for i in chosen]
+        if 0 in chosen:
+            adb("dumpsys batterystats --reset")
+            print("New measurement started. Use the phone off the charger, then look here again.")
+            return
+        picked = [use[i - 1][0] for i in chosen]
         selected = [p for p in picked if p not in keep and not PROTECTED_APPS.search(p)]
         if len(selected) < len(picked):
             print(f"  {len(picked) - len(selected)} skipped: on the keep list, or a part the phone needs.")
@@ -2572,8 +2610,21 @@ def battery_use_menu(backup):
             print(f"  Restricted {len(set(selected) & restricted_now())} of {len(selected)}. RESTORE undoes it.")
 
 
+def sleep_now():
+    """Screen off and straight into deep sleep, without waiting for Android's timers."""
+    out = adb("input keyevent 223; dumpsys deviceidle force-idle")[1].strip()
+    print(f"  {out.splitlines()[-1] if out else 'No answer from the phone.'}")
+    print("  Deep sleep ends when you wake the phone. Apps on the keep list may get messages a little late until then.")
+
+
 def battery_status(keep):
     print(f"\nBattery: {battery_line(adb('dumpsys battery')[1])}")
+    thermal = re.search(r"Thermal Status: (\d)", adb("dumpsys thermalservice | grep -m1 'Thermal Status'")[1])
+    if thermal:
+        print(f"Temperature state: {THERMAL.get(thermal[1], thermal[1])} (heat wears the battery out faster)")
+    screen = re.search(r"Screen on: (.*?) \(", adb("dumpsys batterystats --charged | grep -m1 'Screen on:'")[1])
+    if screen:
+        print(f"Screen on since the last full charge: {re.sub(r' ?[0-9]+ms', '', screen[1])}")
     power = power_saving_on()
     print(f"[{'x' if power else ' '}] Power saving on (paused while charging, back when unplugged)")
     print(f"[{'x' if night_mode() == 'yes' else ' '}] Dark mode on")
@@ -2678,6 +2729,7 @@ def battery_menu():
         "Radios               Wi-Fi, mobile data, Bluetooth, NFC, location on or off",
         "Extra savers         optional: 5G off, diagnostics apps off, lower resolution, charge limit",
         "Battery use          which apps used the most battery since the last charge",
+        "Sleep now            screen off and straight into deep sleep",
         "Status               what is applied right now",
         "RESTORE              undo everything the Battery tool changed",
     ]
@@ -2711,6 +2763,8 @@ def battery_menu():
             extras_menu(backup)
         elif name == "Battery use":
             battery_use_menu(backup)
+        elif name == "Sleep now":
+            sleep_now()
         elif name == "Status":
             battery_status(load_keep())
         elif name == "RESTORE":
@@ -2864,6 +2918,9 @@ def self_check():
     assert display_sizes(1440, 3120, modes) == [(1440, 3120), (1080, 2340)]
     assert display_sizes(1080, 2412, "supportedModes [{id=1, width=1080, height=2412, fps=60.0}]") == [(1080, 2412)]
     assert display_sizes(1440, 3088, "") == [(1440, 3088), (1080, 2316), (720, 1544)]
+    held = ("  PARTIAL_WAKE_LOCK              'AudioMix' ACQ=-1m2s (uid=1041 pid=0)\n"
+            "  PARTIAL_WAKE_LOCK 'job/x' ACQ=-3s (uid=1000 pid=1 ws=WorkSource{10213 com.a})\n  SCREEN_BRIGHT_WAKE_LOCK 'w' (uid=1000 pid=2)\n")
+    assert parse_wake_locks(held) == [("1041", "AudioMix"), ("10213", "job/x")] and parse_wake_locks("") == []
     assert fmt_size(999) == "999 B" and fmt_size(1500) == "1.5 KB" and fmt_size(250_000_000) == "250 MB"
     print("self-check ok")
 

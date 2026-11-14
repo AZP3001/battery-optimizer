@@ -255,7 +255,9 @@
         <div class="row" style="margin-top:12px"><button class="btn" data-act="status">Refresh</button></div></div>
       <div class="card"><h2>Top battery users</h2><p class="muted small">Apps that used the most battery since the last full charge.</p>
         <div id="useList" class="muted small">Press Show.</div>
-        <div class="row" style="margin-top:12px"><button class="btn" data-act="use">Show</button><button class="btn hidden" id="useSelect" title="Selects the ones not on your keep list, so you can restrict them">Select in Apps tab</button></div></div>
+        <div class="row" style="margin-top:12px"><button class="btn" data-act="use">Show</button><button class="btn hidden" id="useSelect" title="Selects the ones not on your keep list, so you can restrict them">Select in Apps tab</button><button class="btn" data-act="useReset" title="Forget the numbers so far and start counting again">New measurement</button></div></div>
+      <div class="card"><h2>Sleep now</h2><p class="muted">Turns the screen off and puts the phone straight into deep sleep, without waiting for Android's timers. It ends when you wake the phone.</p>
+        <button class="btn" data-act="sleepnow">Sleep now</button><div class="result" id="res-sleepnow"></div></div>
       <div class="card"><h2>Deep sleep</h2><p class="muted">The phone goes into deep sleep about 30 seconds after the screen turns off, instead of after many minutes.</p>
         <button class="btn" data-act="sleep">Turn on deep sleep</button><div class="result" id="res-sleep"></div></div>
       <div class="card"><h2>Restrict apps</h2><p class="muted">Restrict every app that is not on the keep list, without changing any settings.</p>
@@ -337,7 +339,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.7</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.8</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -415,6 +417,13 @@ const BATTERY_SETTINGS = [
   ["secure", "send_action_app_error", "0", false, "Send app error reports: off"],
   ["system", "samsung_errorlog_agree", "0", true, "Samsung diagnostic data: off"],
   ["global", "wifi_verbose_logging_enabled", "0", false, "Wi-Fi verbose logging: off"],
+  ["global", "stay_on_while_plugged_in", "0", false, "Screen stays on while charging: off"],
+  ["global", "network_recommendations_enabled", "0", false, "Network recommendations: off"],
+  ["secure", "charging_sounds_enabled", "0", false, "Charging sound: off"],
+  ["secure", "charging_vibration_enabled", "0", false, "Charging vibration: off"],
+  ["secure", "screensaver_activate_on_dock", "0", false, "Screen saver when docked: off"],
+  ["secure", "screensaver_activate_on_sleep", "0", false, "Screen saver while charging: off"],
+  ["system", "notification_light_pulse", "0", false, "Notification light: off"],
   ["global", "battery_saver_constants", SAVER_CONSTANTS, false, "Stronger power saving mode"],
   ["global", "window_animation_scale", "0.5", false, "Window animations 0.5x"],
   ["global", "transition_animation_scale", "0.5", false, "Transition animations 0.5x"],
@@ -544,6 +553,18 @@ function parseBattery(text) {
   const capacity = counter > 0 && level >= 20 ? Math.round(counter / 1000 * 100 / level) : null;
   return { level, temp: temp === null ? null : temp / 10, health, capacity };
 }
+const THERMAL = { 0: "normal", 1: "light heat", 2: "moderate heat", 3: "severe heat", 4: "critical heat", 5: "emergency", 6: "shutdown" };
+// [[uid, tag]] of the wake locks held right now, from "dumpsys power". A wake lock keeps the processor awake.
+// When a system service holds it for an app, the app's uid is in "WorkSource{...}" and wins.
+function parseWakeLocks(text) {
+  const locks = [];
+  for (const line of text.split("\n")) {
+    const m = line.match(/PARTIAL_WAKE_LOCK\s+'([^']*)'.*?\(uid=(\d+)/);
+    if (m) locks.push([(line.match(/WorkSource\{(\d+)/) || [])[1] || m[2], m[1]]);
+  }
+  return locks;
+}
+const screenOnTime = async () => ((await sh("dumpsys batterystats --charged | grep -m1 'Screen on:'")).match(/Screen on: (.*?) \(/) || [])[1]?.replace(/ ?\d+ms/, "");
 // [[uid, mAh]] biggest first, from the "Estimated power use" lines of "dumpsys batterystats".
 function parsePowerUse(text) {
   const use = {};
@@ -1450,6 +1471,10 @@ async function refreshStatus() {
   $("#phoneBatt").textContent = batt.level === null ? "" : `· ${batt.level}%`;
   add(true, "Battery: " + [batt.level === null ? "unknown" : batt.level + "%", batt.temp !== null && batt.temp.toFixed(1) + " °C",
     batt.health && "health " + batt.health, batt.capacity && `about ${batt.capacity} mAh when full (estimate)`].filter(Boolean).join(" · "));
+  const thermal = (await sh("dumpsys thermalservice | grep -m1 'Thermal Status'")).match(/Thermal Status: (\d)/);
+  if (thermal) add(thermal[1] === "0", `Temperature state: ${THERMAL[thermal[1]] || thermal[1]} (heat wears the battery out faster)`);
+  const screen = await screenOnTime();
+  if (screen) add(true, `Screen on since the last full charge: ${screen}`);
   add(power, "Power saving on (paused while charging, back when unplugged)");
   add((await nightMode()) === "yes", "Dark mode on");
   add(await dataSaverOn(), "Background mobile data blocked");
@@ -1478,8 +1503,13 @@ async function renderUse() {
   USE = parsePowerUse(out).filter(([uid, mah]) => byUid[uid] && mah >= 0.1).slice(0, 12).map(([uid, mah]) => [byUid[uid], mah]);
   const keep = currentKeep();
   $("#useSelect").classList.toggle("hidden", !USE.length);
-  if (!USE.length) { $("#useList").textContent = "The phone has no battery use numbers yet. Use it off the charger for a while first."; return; }
-  $("#useList").replaceChildren(...USE.map(([a, mah]) => {
+  const extra = [];
+  const screen = await screenOnTime();
+  if (screen) extra.push(el("p", "", `Screen on: ${screen}`));
+  const locks = parseWakeLocks(await sh("dumpsys power | grep WAKE_LOCK")).slice(0, 8);
+  if (locks.length) extra.push(el("p", "", "Keeping the phone awake right now: " + locks.map(([uid, tag]) => `${byUid[uid]?.name || "Android system"} (${tag})`).join(", ")));
+  if (!USE.length) { $("#useList").replaceChildren(el("p", "", "The phone has no battery use numbers yet. Use it off the charger for a while first."), ...extra); return; }
+  $("#useList").replaceChildren(...extra, ...USE.map(([a, mah]) => {
     const row = el("div", "userow"), name = el("span", "name", a.name);
     row.append(iconEl(a, 24), name, ...(keep.has(a.p) ? [el("span", "badge blue", "Keep")] : a.bgOff ? [el("span", "badge green", "Restricted")] : []),
       el("span", "size", mah.toFixed(1) + " mAh"));
@@ -2684,6 +2714,17 @@ const ACTIONS = {
   max: (b) => maxBatteryUi(b),
   status: (b) => runButton(b, refreshStatus),
   use: (b) => runButton(b, renderUse),
+  useReset: async (b) => {
+    if (await modal("Start a new measurement?", "The battery use numbers so far are forgotten and counting starts again. Use the phone off the charger for a while, then press Show.",
+      [["Cancel", ""], ["Start", "ok", "primary"]]) !== "ok") return;
+    await runButton(b, async () => { await sh("dumpsys batterystats --reset"); await renderUse(); });
+  },
+  sleepnow: (b) => runButton(b, async () => {
+    const out = (await sh("input keyevent 223; dumpsys deviceidle force-idle")).trim();
+    log(out.split("\n").pop() || "No answer from the phone.");
+    if (!/idle/i.test(out)) return "⚠ Not possible";
+    log("Deep sleep ends when you wake the phone.");
+  }, card("sleepnow")),
   sleep: (b) => runButton(b, async () => { const ok = await applyDeepSleep(loadBackup()); await refreshStatus(); if (!ok) return "⚠ Not possible"; }, card("sleep")),
   restrict: async (b) => { const k = await ensureKeep(); if (k) await runButton(b, async () => { const ok = await restrictApps(k, loadBackup()); await refreshStatus(); await loadApps(); if (!ok) return "⚠ Partly done"; }, card("restrict")); },
   data: async (b) => { const k = await ensureKeep(); if (k) await runButton(b, async () => { const ok = await blockBackgroundData(k, loadBackup()); await refreshStatus(); if (!ok) return "⚠ Not possible"; }, card("data")); },
