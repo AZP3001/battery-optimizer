@@ -5,7 +5,7 @@
 No root needed. No app to install on the phone. One script, one menu.
 
 > 🌐 **Try it in the browser:** https://azp3001.github.io/battery-optimizer/web/
-> ⚠️ The website is **experimental** and **not recommended over the scripts yet**. It has the Battery, Optimize, Autostart and Permissions tools, real app names and icons, and some Cleanup tools (free RAM, flush free space, install an APK). Deleting files, contacts and messages is only in the scripts. It has not been tested as much. For now, use the Linux script or the Windows file below.
+> ⚠️ The website is **experimental** and **not recommended over the scripts yet**. It has the Battery, Optimize, Autostart and Permissions tools, real app names and icons, a Storage tab (apps and files by size: uninstall, clear data, delete files) and some Cleanup tools (free RAM, flush free space, install an APK). Deleting contacts, messages and settings is only in the scripts. It has not been tested as much. For now, use the Linux script or the Windows file below.
 
 ## What it does, in plain words
 

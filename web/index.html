@@ -163,6 +163,18 @@
   .app .switch { margin-left:4px; }
   dialog { width:min(600px, calc(100vw - 32px)); max-height:calc(100vh - 48px); }
   input[type=file] { color:var(--muted); }
+  /* storage tab */
+  .usage { display:flex; height:14px; border-radius:999px; overflow:hidden; background:var(--surface2); margin:14px 0 12px; }
+  .usage span { height:100%; }
+  .legend { display:flex; flex-wrap:wrap; gap:6px 18px; font-size:13px; color:var(--muted); }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; vertical-align:-1px; }
+  .size { font-variant-numeric:tabular-nums; font-weight:600; white-space:nowrap; min-width:72px; text-align:right; }
+  .filetype { background:var(--surface2); color:var(--muted); font-size:10px; font-weight:700; letter-spacing:.03em; }
+  #storageView button { padding:6px 14px; font-size:14px; }
+  .applybar .btn.danger { color:#fff; background:var(--red); border-color:var(--red); }
+  .btn.danger.done, .applybar .btn.danger.done { background:var(--green); border-color:var(--green); color:#fff; }
+  .btn.danger.warn, .applybar .btn.danger.warn { background:var(--amber); border-color:var(--amber); color:#111; }
+  .applybar .btn.danger:disabled { background:var(--surface2); border-color:var(--line); color:var(--muted); }
   /* the gear window's Apply stays visible while scrolling */
   #modal > .actions:last-child { position:sticky; bottom:-24px; background:var(--surface); padding:12px 0 4px; margin-bottom:0; }
 </style>
@@ -180,6 +192,7 @@
       <button role="tab" data-tab="settings">Settings</button>
       <button role="tab" data-tab="permissions">Permissions</button>
       <button role="tab" data-tab="radios">Radios</button>
+      <button role="tab" data-tab="storage">Storage</button>
       <button role="tab" data-tab="tools">Tools</button>
     </nav>
     <div class="phone"><span class="dot" id="dot"></span><span id="phoneName" class="muted">Not connected</span>
@@ -208,6 +221,7 @@
       <div>
         <div class="toolbar">
           <input type="search" class="search" id="search" placeholder="Search apps">
+          <label class="small muted" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="showAllSystem"> Show all system parts</label>
           <button class="btn" id="reload" title="Read the app list from the phone again">Refresh</button>
         </div>
         <div class="chips" id="chips"></div>
@@ -270,6 +284,18 @@
     <div class="applybar"><span class="muted" id="radioCount">No changes</span><button class="btn primary" id="radioApply" disabled>Apply</button></div>
   </section>
 
+  <!-- Storage: what uses space, apps and files by size; uninstall, clear data, delete -->
+  <section id="tab-storage" class="hidden">
+    <div class="card" id="storageSummary"><span class="spinner"></span></div>
+    <div class="toolbar" style="margin-top:20px">
+      <div class="seg" id="storageView"><button type="button" data-v="apps">Apps by size</button><button type="button" data-v="files">Files by size</button></div>
+      <input type="search" class="search" id="storageSearch" placeholder="Search">
+    </div>
+    <div class="chips hidden" id="fileChips"></div>
+    <div class="list" id="storageList"></div>
+    <div class="applybar" id="storageBar"></div>
+  </section>
+
   <!-- Tools from the script's cleanup menu that are safe in a browser -->
   <section id="tab-tools" class="hidden">
     <div class="cards">
@@ -283,7 +309,7 @@
       <div class="card"><h2>App names &amp; icons</h2><p class="muted">Names and icons are read from each app once and remembered in this browser. Clear them to read them again.</p>
         <button class="btn" data-act="clearNames">Read names again</button><div class="result" id="res-clearNames"></div></div>
     </div>
-    <p class="muted small" style="margin-top:16px">Deleting files, contacts, messages and settings stays in the scripts' Cleanup tool for now.</p>
+    <p class="muted small" style="margin-top:16px">Files and apps can be deleted in the Storage tab. Deleting contacts, messages and settings stays in the scripts' Cleanup tool for now.</p>
   </section>
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
@@ -774,6 +800,7 @@ async function loadNamesAndIcons() {
     if (c && c.apk === apk) applyMeta(a, c); else todo.push([a, apk]);
   }
   sortApps(); renderApps();
+  todo.sort(([a], [b]) => a.tier - b.tier);
   const total = todo.length; let done = 0;
   const progress = $("#nameProgress");
   const worker = async () => {
@@ -792,7 +819,9 @@ async function loadNamesAndIcons() {
 }
 
 // ---------- apps tab ----------
-// Critical system parts (tier 4) are only listed when they are optimized or off, so they can be turned back on.
+// APPS holds every installed package. The Apps list hides critical system parts (tier 4) unless they are optimized
+// or off (so they can be turned back on), or "Show all system parts" is ticked.
+let showAllSystem = loadJson("phone-show-all-system", false);
 let APPS = [], selected = new Set(), filter = "all", appsLoaded = false;
 const FILTERS = [["all", "All"], ["user", "Your apps"], ["extra", "Preinstalled"], ["system", "System (not recommended)"],
   ["opt", "Optimized"], ["notopt", "Not optimized"], ["keep", "Keep list"], ["boot", "Starts at boot"], ["off", "Disabled"]];
@@ -809,7 +838,7 @@ const CONTROLS = [
 ];
 const BUCKETS = [["active", "Active"], ["working_set", "Working set"], ["frequent", "Frequent"], ["rare", "Rare"], ["restricted", "Restricted"]];
 const PALETTE = ["#2f81f7", "#3fb950", "#a371f7", "#db6d28", "#d29922", "#f778ba", "#39c5cf", "#8957e5"];
-const GROUPS = { 1: "Your apps", 2: "Preinstalled extras - safe", 3: "System parts - not recommended", 4: "Critical system - turn these back on" };
+const GROUPS = { 1: "Your apps", 2: "Preinstalled extras - safe", 3: "System parts - not recommended", 4: "Critical system - careful, the phone may need these" };
 const GEAR = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>`;
 
 function currentKeep() { return loadKeep() ?? new Set([...SUGGESTED_KEEP].filter((p) => APPS.some((a) => a.p === p))); }
@@ -832,7 +861,7 @@ async function loadApps({ keepSide = false } = {}) {
     p, tier: tierOf(p, user), name: old[p]?.name || nameOf(p), icon: old[p]?.icon || "", uid: uids[p], boot: boot.has(p),
     optimized: OPTIMIZE_OPS.every((op) => ignored[op].has(p)), bgOff: ignored.RUN_ANY_IN_BACKGROUND.has(p),
     dataOff: uids[p] !== undefined && blocked.has(uids[p]), off: off.has(p),
-  })).filter((a) => a.tier < 4 || a.optimized || a.off);
+  }));
   sortApps();
   const still = new Set(APPS.map((a) => a.p));
   selected = new Set([...selected].filter((p) => still.has(p)));
@@ -846,7 +875,7 @@ function visibleApps() {
   const s = $("#search").value.trim().toLowerCase(), keep = currentKeep();
   const test = { all: () => true, user: (a) => a.tier === 1, extra: (a) => a.tier === 2, system: (a) => a.tier >= 3,
     opt: (a) => a.optimized, notopt: (a) => !a.optimized, keep: (a) => keep.has(a.p), boot: (a) => a.boot, off: (a) => a.off }[filter];
-  return APPS.filter((a) => test(a) && (!s || a.name.toLowerCase().includes(s) || a.p.includes(s)));
+  return APPS.filter((a) => (a.tier < 4 || a.optimized || a.off || showAllSystem) && test(a) && (!s || a.name.toLowerCase().includes(s) || a.p.includes(s)));
 }
 
 function appRow(a, keep) {
@@ -1040,7 +1069,8 @@ async function appSettings(a) {
   rows.push(bucketRow);
 
   // Permissions this app asks for, most important first (same list as the script's permissions tool).
-  const asked = PERMISSIONS.filter(([, names]) => names.split(" ").some((n) => perms[0].has("android.permission." + n)));
+  const asked = PERMISSIONS.filter(([, names, special]) => names.split(" ").some((n) => perms[0].has("android.permission." + n)) ||
+    (special && opMode(ops[special[0]])));
   if (asked.length) rows.push(el("div", "section-title", "Permissions"));
   for (const [title, names, special] of asked) {
     const has = permissionHolders(names, special, { [a.p]: perms }, special ? { [special[0]]: { [a.p]: opMode(ops[special[0]]) } } : {})[a.p];
@@ -1154,9 +1184,13 @@ function parseOpModes(text) {
 // {package: has it} for every package that asks for one of the permissions.
 function permissionHolders(names, special, packages, modes) {
   const full = new Set(names.split(" ").map((n) => "android.permission." + n));
-  const state = {};
-  for (const [pkg, [requested, granted]] of Object.entries(packages)) {
-    if (![...requested].some((r) => full.has(r))) continue;
+  const state = {}, none = [new Set(), new Set()];
+  // Some phones leave appop-type permissions out of the package dump, so an app Android reports for the
+  // special access (allowed or denied) counts as asking for it.
+  const pkgs = new Set([...Object.keys(packages), ...(special ? Object.keys(modes[special[0]] || {}) : [])]);
+  for (const pkg of pkgs) {
+    const [requested, granted] = packages[pkg] || none;
+    if (![...requested].some((r) => full.has(r)) && !(special && modes[special[0]]?.[pkg])) continue;
     // shortcut: an app-op left on "default" follows the granted permission, which holds for these five special accesses.
     const mode = special ? modes[special[0]]?.[pkg] : undefined;
     state[pkg] = mode ? mode === "allow" : [...granted].some((g) => full.has(g));
@@ -1203,8 +1237,8 @@ async function renderPermissions() {
     if (has !== last) { last = has; rows.push(el("div", "group", has ? "Have it" : "Do not have it, but can")); }
     const a = visible.get(p), row = el("div", "app");
     const info = el("div", "info"); info.append(el("div", "name", a.name), el("div", "pkg", p));
-    const s = stagedSwitch(has, (changed, v) => st.mark(p, row, changed, () => setPermissionCmd(p, names, special, v, packages[p][0])), `${title} for ${a.name}`);
-    row.append(iconEl(a), info, ...(a.tier === 3 ? [el("span", "badge amber", "System")] : []), s);
+    const s = stagedSwitch(has, (changed, v) => st.mark(p, row, changed, () => setPermissionCmd(p, names, special, v, (packages[p] || [new Set()])[0])), `${title} for ${a.name}`);
+    row.append(iconEl(a), info, ...(a.tier >= 3 ? [el("span", "badge amber", "System")] : []), s);
     row.onclick = (e) => { if (e.target === row || e.target.closest(".info, .icon")) s.input.click(); };
     rows.push(row);
   }
@@ -1391,10 +1425,233 @@ async function installApk(set) {
   appsLoaded = false;
 }
 
+// ---------- storage tab: overview, apps by size, files by size ----------
+const fmtBytes = (n) => {
+  if (!(n >= 0)) return "?";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; }
+  return `${n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)} ${u[i]}`;
+};
+// "dumpsys diskstats": free/total space, size per kind of data, and per app (as Android last measured it).
+function parseDiskstats(t) {
+  const num = (k) => { const m = t.match(new RegExp(`^${k}: (\\d+)`, "m")); return m ? Number(m[1]) : null; };
+  const arr = (k) => { const m = t.match(new RegExp(`^${k}: (\\[.*\\])`, "m")); try { return m ? JSON.parse(m[1]) : []; } catch { return []; } };
+  const free = t.match(/^Data-Free: (\d+)K \/ (\d+)K total/m);
+  const names = arr("Package Names"), app = arr("App Sizes"), data = arr("App Data Sizes"), cache = arr("Cache Sizes");
+  return {
+    free: free ? free[1] * 1024 : null, total: free ? free[2] * 1024 : null,
+    kinds: [["Apps", num("App Size")], ["App data", num("App Data Size")], ["Photos", num("Photos Size")], ["Videos", num("Videos Size")],
+      ["Audio", num("Audio Size")], ["Downloads", num("Downloads Size")], ["System", num("System Size")], ["Other", num("Other Size")]]
+      .filter(([, v]) => v !== null),
+    apps: names.map((p, i) => ({ p, app: app[i] || 0, data: data[i] || 0, cache: cache[i] || 0 })),
+  };
+}
+// Same categories as the script's cleanup tool: name -> regex the file path must match.
+const FILE_CATEGORIES = [
+  ["All files", ""], ["Photos", "\\.(jpe?g|png|gif|webp|hei[cf]|dng|bmp|avif)$"], ["Videos", "\\.(mp4|mkv|mov|avi|webm|3gp|m4v)$"],
+  ["Audio", "\\.(mp3|m4a|aac|ogg|opus|flac|wav|amr)$"], ["Documents", "\\.(pdf|docx?|xlsx?|pptx?|odt|txt|csv|rtf|epub)$"],
+  ["Downloads", "^/(sdcard|storage/[^/]+)/+Download/"], ["Trash & thumbnails", "/\\.(trash|thumbnails)|/\\.trashed-"], ["SD card", "^/storage/"],
+];
+// Prints "<index> <status>" per file: 0 done, 1 still there, 3 removed but not overwritten first (from the script).
+const WIPE_FUNCTION = `w() {
+  n=$(stat -c %s "$2") || { echo "$1 1"; return; }
+  if [ "$n" -ge 1048576 ]; then b=1048576; else b=4096; fi
+  dd if=/dev/urandom of="$2" bs=$b count=$(( (n + b - 1) / b )) conv=notrunc 2>/dev/null; d=$?
+  rm -f "$2"
+  if [ -e "$2" ]; then echo "$1 1"; elif [ "$d" -ne 0 ]; then echo "$1 3"; else echo "$1 0"; fi
+}`;
+const SHOW_FILES = 500;   // the list shows the largest 500 that match; search narrows it down
+let storageView = "apps", fileCat = 0, STORAGE = null, FILES = null, storageSel = new Set();
+
+async function renderStorage() {
+  if (!appsLoaded) await loadApps();
+  STORAGE = parseDiskstats(await sh("dumpsys diskstats"));
+  renderStorageSummary();
+  if (storageView === "files" && !FILES) await loadFiles();
+  renderStorageList();
+}
+function renderStorageSummary() {
+  const box = $("#storageSummary"), s = STORAGE;
+  if (!s.total) { box.replaceChildren(el("p", "muted", "This phone did not report its storage use.")); return; }
+  const used = s.total - s.free;
+  const bar = el("div", "usage");
+  const colors = ["#2f81f7", "#a371f7", "#3fb950", "#db6d28", "#d29922", "#39c5cf", "#8b949e", "#6e7681"];
+  const legend = el("div", "legend");
+  s.kinds.forEach(([name, v], i) => {
+    const part = el("span"); part.style.cssText = `width:${(v / s.total) * 100}%;background:${colors[i]}`; part.title = `${name}: ${fmtBytes(v)}`;
+    bar.append(part);
+    const l = el("span"); const dot = el("i"); dot.style.background = colors[i];
+    l.append(dot, `${name} ${fmtBytes(v)}`); legend.append(l);
+  });
+  const head = el("div", "row"); head.style.justifyContent = "space-between";
+  head.append(el("h2", "", `${fmtBytes(used)} used of ${fmtBytes(s.total)}`), el("span", "muted", `${fmtBytes(s.free)} free`));
+  box.replaceChildren(head, bar, legend, el("p", "muted small", "Sizes per kind and per app are from Android's last storage check, so they can be a little out of date."));
+}
+
+async function loadFiles() {
+  $("#storageList").replaceChildren(el("div", "empty", "Looking through all files... (this can take a minute)"));
+  const cards = (await sh("ls /storage 2>/dev/null")).split(/\s+/).filter((n) => n && n !== "emulated" && n !== "self").map((n) => `/storage/${n}/`);
+  const roots = ["/sdcard/", ...cards].map(q).join(" ");
+  const out = await sh(`find ${roots} -type f -exec stat -c '%s %n' {} + 2>/dev/null`);
+  FILES = [];
+  for (const line of out.split("\n")) {
+    const i = line.indexOf(" ");
+    if (i > 0 && /^\d+$/.test(line.slice(0, i))) FILES.push({ size: Number(line.slice(0, i)), path: line.slice(i + 1) });
+  }
+  FILES.sort((a, b) => b.size - a.size);
+}
+
+function storageRows() {
+  const s = $("#storageSearch").value.trim().toLowerCase();
+  if (storageView === "apps") {
+    const known = new Map(APPS.map((a) => [a.p, a]));
+    return STORAGE.apps.map((x) => ({ ...x, a: known.get(x.p) || { p: x.p, name: nameOf(x.p), tier: 4, icon: "" }, size: x.app + x.data + x.cache }))
+      .filter((x) => !s || x.a.name.toLowerCase().includes(s) || x.p.includes(s))
+      .sort((a, b) => b.size - a.size);
+  }
+  const re = new RegExp(FILE_CATEGORIES[fileCat][1], "i");
+  return FILES.filter((f) => re.test(f.path) && (!s || f.path.toLowerCase().includes(s)));
+}
+
+function renderStorageList() {
+  $("#storageView").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.v === storageView));
+  $("#fileChips").classList.toggle("hidden", storageView !== "files");
+  $("#fileChips").replaceChildren(...FILE_CATEGORIES.map(([name], i) => {
+    const c = el("button", "chip", name); c.setAttribute("aria-pressed", i === fileCat);
+    c.onclick = () => { fileCat = i; storageSel.clear(); renderStorageList(); };
+    return c;
+  }));
+  const list = $("#storageList");
+  if (storageView === "files" && !FILES) { list.replaceChildren(el("div", "empty", "Loading...")); return; }
+  const all = storageRows(), rows = storageView === "files" ? all.slice(0, SHOW_FILES) : all;
+  const key = (x) => storageView === "apps" ? x.p : x.path;
+  const total = all.reduce((n, x) => n + x.size, 0);
+  // Heading box selects every row shown, like the section boxes in the Apps tab.
+  const head = el("div", "group");
+  head.append(el("div", "tick"), el("span", "", storageView === "apps" ? "Apps, biggest first" :
+    `${all.length} files, ${fmtBytes(total)}${all.length > SHOW_FILES ? ` (showing the largest ${SHOW_FILES})` : ""}`), el("span", "count"));
+  head.onclick = () => { const every = rows.every((x) => storageSel.has(key(x))); rows.forEach((x) => (every ? storageSel.delete(key(x)) : storageSel.add(key(x)))); renderStorageList(); };
+  const n = rows.filter((x) => storageSel.has(key(x))).length;
+  head.classList.toggle("all", rows.length > 0 && n === rows.length); head.classList.toggle("some", n > 0 && n < rows.length);
+  head.querySelector(".count").textContent = n ? `${n} selected` : "";
+  const out = [head];
+  for (const x of rows) {
+    const row = el("div", "app" + (storageSel.has(key(x)) ? " sel" : ""));
+    const info = el("div", "info"), size = el("div", "size", fmtBytes(x.size));
+    if (storageView === "apps") {
+      info.append(el("div", "name", x.a.name), el("div", "pkg", `App ${fmtBytes(x.app)} · Data ${fmtBytes(x.data)} · Cache ${fmtBytes(x.cache)}`));
+      row.append(el("div", "tick"), iconEl(x.a), info, ...(x.a.tier > 1 ? [el("span", "badge", x.a.tier === 4 ? "System" : "Preinstalled")] : []), size);
+    } else {
+      const slash = x.path.lastIndexOf("/");
+      info.append(el("div", "name", x.path.slice(slash + 1)), el("div", "pkg", x.path.slice(0, slash).replace(/^\/sdcard\/*/, "Internal/")));
+      const ext = (x.path.match(/\.(\w{1,5})$/) || [, "file"])[1].toUpperCase();
+      row.append(el("div", "tick"), el("div", "icon filetype", ext), info, size);
+    }
+    row.onclick = () => { storageSel.has(key(x)) ? storageSel.delete(key(x)) : storageSel.add(key(x)); renderStorageList(); };
+    out.push(row);
+  }
+  if (!rows.length) out.push(el("div", "empty", "Nothing here."));
+  list.replaceChildren(...out);
+  renderStorageBar();
+}
+
+// Bottom bar: what is selected, and the buttons that act on it. The buttons are built once per view and only
+// updated afterwards, so a running button keeps its progress and its "Done".
+let barView = null, bar = {};
+const selectedStorageRows = () => storageRows().filter((x) => storageSel.has(storageView === "apps" ? x.p : x.path));
+function renderStorageBar() {
+  if (barView !== storageView) {
+    barView = storageView; bar = { info: el("span", "muted") };
+    if (storageView === "apps") {
+      bar.caches = el("button", "btn", "Clear all caches");
+      bar.caches.title = "Ask Android to empty every app's cache. Apps keep their data and sign-ins.";
+      bar.caches.onclick = () => runButton(bar.caches, async () => {
+        log((await sh("pm trim-caches 4096G")).trim() || "Caches cleared.");
+        STORAGE = parseDiskstats(await sh("dumpsys diskstats")); renderStorageSummary(); renderStorageList();
+      });
+      bar.clear = el("button", "btn", "Clear data"); bar.uninstall = el("button", "btn danger", "Uninstall");
+      bar.clear.onclick = () => storageAppAction(bar.clear, selectedStorageRows(), "clear");
+      bar.uninstall.onclick = () => storageAppAction(bar.uninstall, selectedStorageRows(), "uninstall");
+      bar.acts = [bar.clear, bar.uninstall];
+      $("#storageBar").replaceChildren(bar.info, bar.caches, bar.clear, bar.uninstall);
+    } else {
+      bar.reload = el("button", "btn", "Look again");
+      bar.reload.onclick = () => runButton(bar.reload, async () => { FILES = null; storageSel.clear(); await loadFiles(); renderStorageList(); });
+      bar.del = el("button", "btn danger", "Delete");
+      bar.del.onclick = () => deleteFiles(bar.del, selectedStorageRows());
+      bar.acts = [bar.del];
+      $("#storageBar").replaceChildren(bar.info, bar.reload, bar.del);
+    }
+  }
+  const rows = selectedStorageRows(), size = rows.reduce((n, x) => n + x.size, 0);
+  bar.info.textContent = rows.length ? `${rows.length} selected · ${fmtBytes(size)}` : "Click rows to select them";
+  for (const b of bar.acts) if (!b.dataset.running) b.disabled = !rows.length && !b.classList.contains("done") && !b.classList.contains("warn");
+}
+
+async function storageAppAction(btn, rows, what) {
+  // Uninstall: only apps you installed (preinstalled ones can be disabled in the Apps tab instead).
+  // Clear data: never for parts that calls, unlocking or this USB connection need.
+  const ok = rows.filter((x) => what === "uninstall" ? x.a.tier === 1 : !PROTECTED_APPS.test(x.p) && x.a.tier < 4);
+  const skipped = rows.length - ok.length;
+  if (!ok.length) { await modal("Not possible", what === "uninstall" ? "Only apps you installed can be uninstalled here. Preinstalled apps can be disabled in the Apps tab." : "These are system parts the phone needs.", [["OK", "ok", "primary"]]); return; }
+  const names = ok.slice(0, 8).map((x) => x.a.name).join(", ") + (ok.length > 8 ? ` and ${ok.length - 8} more` : "");
+  const text = (what === "uninstall" ? `Remove ${ok.length} apps from the phone: ${names}.` : `Erase all data of ${ok.length} apps (sign-ins, settings, files): ${names}. They stay installed.`) +
+    (skipped ? `\n\n${skipped} selected ${skipped > 1 ? "are" : "is"} skipped (${what === "uninstall" ? "preinstalled" : "system parts"}).` : "");
+  if (await modal(what === "uninstall" ? "Uninstall?" : "Clear data?", text, [["Cancel", ""], [what === "uninstall" ? "Uninstall" : "Clear data", "ok", "primary"]]) !== "ok") return;
+  await runButton(btn, async (set) => {
+    let done = 0, failed = 0;
+    for (const x of ok) {
+      set(`${what === "uninstall" ? "Uninstalling" : "Clearing"} ${++done}/${ok.length}...`);
+      const out = (await sh(`pm ${what === "uninstall" ? "uninstall" : "clear"} ${q(x.p)}`)).trim();
+      if (!out.includes("Success")) { failed++; log(`FAILED ${x.p}: ${out}`); }
+      else { storageSel.delete(x.p); log(`${what === "uninstall" ? "Uninstalled" : "Cleared"}: ${x.a.name}`); }
+    }
+    if (what === "uninstall") appsLoaded = false;
+    set("Checking...");
+    await loadApps(); STORAGE = parseDiskstats(await sh("dumpsys diskstats"));
+    // Android measures app sizes on its own schedule, so uninstalled apps are dropped from the list right away.
+    if (what === "uninstall") STORAGE.apps = STORAGE.apps.filter((x) => APPS.some((a) => a.p === x.p) || !ok.some((o) => o.p === x.p));
+    renderStorageSummary(); renderStorageList();
+    if (failed) return `⚠ ${failed} failed`;
+  });
+}
+
+async function deleteFiles(btn, rows) {
+  const size = rows.reduce((n, x) => n + x.size, 0);
+  const list = rows.slice(0, 6).map((x) => "  " + x.path.replace(/^\/sdcard\/*/, "")).join("\n") + (rows.length > 6 ? `\n  ...and ${rows.length - 6} more` : "");
+  // Many files at once must be confirmed by typing, like DELETE ALL in the script.
+  let typed = null;
+  if (rows.length > 20) { typed = el("input", "search"); typed.placeholder = "Type DELETE"; typed.style.cssText = "width:100%;margin-top:12px"; }
+  const answer = await modal(`Permanently delete ${rows.length} files (${fmtBytes(size)})?`,
+    `${list}\n\nFiles are overwritten before removal and skip the trash. This cannot be undone.`,
+    [["Cancel", ""], ["Delete", "ok", "primary"]], typed);
+  if (answer !== "ok") return;
+  if (typed && typed.value.trim() !== "DELETE") { toast("Not deleted: type DELETE to confirm."); return; }
+  await runButton(btn, async (set) => {
+    const results = {};
+    for (let i = 0; i < rows.length; i += 50) {
+      set(`Deleting ${i}/${rows.length}...`);
+      const batch = rows.slice(i, i + 50);
+      const out = await sh(WIPE_FUNCTION + "\n" + batch.map((x, j) => `w ${i + j} ${q(x.path)}`).join("\n"));
+      for (const m of out.matchAll(/^(\d+) (\d)\s*$/gm)) results[m[1]] = Number(m[2]);
+    }
+    const failed = rows.filter((x, i) => (results[i] ?? 1) === 1);   // no answer counts as still there
+    rows.forEach((x, i) => results[i] === 3 && log(`Removed, but could not overwrite first: ${x.path}`));
+    const gone = new Set(rows.filter((x) => !failed.includes(x)).map((x) => x.path));
+    FILES = FILES.filter((f) => !gone.has(f.path));
+    gone.forEach((p) => storageSel.delete(p));
+    log(`Deleted ${gone.size} of ${rows.length} files.`);
+    failed.slice(0, 10).forEach((x) => log(`  FAILED: ${x.path}`));
+    STORAGE = parseDiskstats(await sh("dumpsys diskstats")); renderStorageSummary();
+    renderStorageList();
+    if (failed.length) return `⚠ ${failed.length} failed`;
+  });
+}
+
 // ---------- tabs and wiring ----------
 let tab = "apps";
 const TAB_LOAD = { apps: () => appsLoaded || loadApps(), battery: refreshStatus, settings: renderSettings,
-  permissions: renderPermissions, radios: renderRadios, tools: () => {} };
+  permissions: renderPermissions, radios: renderRadios, storage: renderStorage, tools: () => {} };
 function showTab(name) {
   tab = name;
   document.querySelectorAll("[data-tab]").forEach((t) => t.setAttribute("aria-selected", t.dataset.tab === name));
@@ -1415,6 +1672,14 @@ function renderChips() {
 }
 renderChips();
 $("#search").oninput = renderApps;
+$("#showAllSystem").checked = showAllSystem;
+$("#showAllSystem").onchange = (e) => { showAllSystem = e.target.checked; saveJson("phone-show-all-system", showAllSystem); renderApps(); };
+$("#storageSearch").oninput = () => STORAGE && renderStorageList();
+$("#storageView").querySelectorAll("button").forEach((b) => (b.onclick = () => {
+  storageView = b.dataset.v; storageSel.clear();
+  if (storageView === "files" && !FILES) { renderStorageList(); queue(async () => { await loadFiles(); renderStorageList(); }).catch(showError); }
+  else renderStorageList();
+}));
 $("#reload").onclick = () => runButton($("#reload"), loadApps);
 const card = (id) => $("#res-" + id);
 const ACTIONS = {
