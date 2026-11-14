@@ -1,8 +1,14 @@
-# Publishes a GitHub Release with the script attached whenever a tag like v1.0 is pushed.
+# Publishes a GitHub Release with the script attached: on a pushed tag like v1.0,
+# or by hand (Actions > Release > Run workflow), which also creates the tag.
 name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag, e.g. v1.0"
+        default: "v1.0"
 permissions:
   contents: write
 jobs:
@@ -11,6 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash -n battery-optimizer-linux.sh && ./battery-optimizer-linux.sh selfcheck
-      - run: gh release create "$GITHUB_REF_NAME" battery-optimizer-linux.sh --title "Battery Optimizer for Linux $GITHUB_REF_NAME" --notes "First release. Download battery-optimizer-linux.sh, run chmod +x on it, then ./battery-optimizer-linux.sh battery. See the README for setup."
+      - run: gh release create "$TAG" --target "$GITHUB_SHA" battery-optimizer-linux.sh --title "Battery Optimizer for Linux $TAG" --notes "First release. Download battery-optimizer-linux.sh, run chmod +x on it, then ./battery-optimizer-linux.sh battery. See the README for setup."
         env:
+          TAG: ${{ inputs.version || github.ref_name }}
           GH_TOKEN: ${{ github.token }}
