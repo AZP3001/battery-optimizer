@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Battery Optimizer</title>
+<meta name="description" content="Make your Android phone's battery last longer, straight from the browser over USB.">
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1b1f24; --muted:#5d6670; --line:#d9dde3; --accent:#1a7f37; --warn:#9a6700; --bad:#cf222e; --btn:#eef1f4; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1216; --card:#181c22; --text:#e6e9ed; --muted:#9aa4ae; --line:#2c333c; --accent:#3fb950; --warn:#d29922; --bad:#f85149; --btn:#232931; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 0 0 12px; }
+  p.lead { color: var(--muted); margin: 0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--btn); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+  .grid button { text-align: left; }
+  .grid button small { display: block; color: var(--muted); }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tabs button[aria-selected="true"] { border-color: var(--accent); outline: 1px solid var(--accent); }
+  #log { white-space: pre-wrap; font: 13px/1.45 ui-monospace, monospace; max-height: 340px; overflow: auto; margin: 0; }
+  .list { max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; }
+  .list label { display: flex; gap: 8px; align-items: baseline; padding: 4px 10px; border-bottom: 1px solid var(--line); }
+  .list .head { padding: 4px 10px; font-weight: 600; color: var(--muted); background: var(--bg); position: sticky; top: 0; }
+  .green { color: var(--accent); } .yellow { color: var(--warn); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input[type=search] { font: inherit; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--text); flex: 1; min-width: 160px; }
+  .muted { color: var(--muted); }
+  .hidden { display: none; }
+  ol { padding-left: 20px; margin: 8px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Battery Optimizer</h1>
+  <p class="lead">Make your Android phone's battery last much longer. Runs in your browser over a USB cable, with no app on the phone and no root.</p>
+
+  <!-- Step 1: connect. Shown until a phone is connected. -->
+  <section class="card" id="connectCard">
+    <h2>1. Connect your phone</h2>
+    <ol>
+      <li>On the phone: Settings &gt; About phone &gt; tap <b>Build number</b> 7 times.</li>
+      <li>Settings &gt; Developer options &gt; turn on <b>USB debugging</b>.</li>
+      <li>Plug it in, press <b>Connect</b>, pick the phone, then tap <b>Allow</b> on the phone.</li>
+    </ol>
+    <p class="muted">Needs Chrome or Edge on a computer (WebUSB). If another ADB program is running, close it first (<code>adb kill-server</code>). On Windows the phone may need its USB driver.</p>
+    <button class="primary" id="connectBtn">Connect</button>
+  </section>
+
+  <!-- Step 2: the tools. Same tools and wording as the Linux script's Battery, Optimize and Autostart menus. -->
+  <section class="card hidden" id="toolsCard">
+    <div class="row" style="justify-content:space-between"><h2 id="phoneName">Phone</h2><button id="disconnectBtn">Disconnect</button></div>
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="battery" aria-selected="true">Battery</button>
+      <button role="tab" data-tab="optimize">Optimize apps</button>
+      <button role="tab" data-tab="autostart">Autostart</button>
+    </div>
+    <div id="tab-battery" class="grid">
+      <button data-act="max" class="primary">MAX BATTERY<small style="color:inherit">do everything below in one go</small></button>
+      <button data-act="keep">Keep list<small>apps that must keep working (messages, school, banking)</small></button>
+      <button data-act="apps">Apps<small>restrict every app that is not on the keep list</small></button>
+      <button data-act="data">Mobile data<small>block background mobile data, except the keep list</small></button>
+      <button data-act="dataPerApp">Mobile data per app<small>block or allow background mobile data app by app</small></button>
+      <button data-act="settings">Settings<small>power saving, dark mode, no AOD, no scanning, no wake gestures</small></button>
+      <button data-act="sleep">Deep sleep<small>sleep 30 seconds after the screen turns off</small></button>
+      <button data-act="radios">Radios<small>Wi-Fi, mobile data, Bluetooth, NFC, location on or off</small></button>
+      <button data-act="status">Status<small>what is applied right now</small></button>
+      <button data-act="restore">RESTORE<small>undo everything the Battery tool changed</small></button>
+    </div>
+    <div id="tab-optimize" class="hidden">
+      <p class="muted">Optimized apps cannot run in the background, hold wake locks or start foreground services. Green = fully optimized. Yellow = system part, not recommended.</p>
+      <button data-act="optimize">Load app list</button>
+    </div>
+    <div id="tab-autostart" class="hidden">
+      <p class="muted">Apps that start themselves when the phone boots. Blocking uses the same background switch as Optimize.</p>
+      <button data-act="autostart">Load app list</button>
+    </div>
+  </section>
+
+  <!-- App lists (keep list, optimize, ...) are drawn here. -->
+  <section class="card hidden" id="listCard">
+    <h2 id="listTitle"></h2>
+    <p class="muted" id="listHelp"></p>
+    <div class="row"><input type="search" id="listFilter" placeholder="Search apps"><button id="listAll">Select shown</button><button id="listNone">Clear shown</button></div>
+    <div class="list" id="list"></div>
+    <div class="row" id="listActions"></div>
+  </section>
+
+  <section class="card">
+    <h2>Output</h2>
+    <pre id="log">Not connected.</pre>
+  </section>
+
+  <p class="muted">Prefer a terminal? Download the <a href="battery-optimizer-linux.sh">Linux script</a> or the <a href="battery-optimizer-windows.bat">Windows file</a> (double-click). They also have the Cleanup, Permissions and Install tools. Source: <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>.</p>
+</main>
+
+<script type="module">
+// This page is a browser port of the Battery, Optimize and Autostart tools in battery-optimizer-linux.sh.
+// It sends the same shell commands to the phone, over WebUSB instead of the adb program.
+// Keep the constants below in sync with the Python part of the script.
+import { Adb, AdbDaemonTransport, AdbDaemonWebUsbDeviceManager, AdbWebCredentialStore } from "./webadb.js";
+
+const $ = (s) => document.querySelector(s);
+let adb = null, serial = "";
+let TIERS = {}, LABELS = {};   // read from the script itself, so there is one app table for every version
+
+// ---------- output and small helpers ----------
+const logEl = $("#log");
+function log(text) { logEl.textContent += text + "\n"; logEl.scrollTop = logEl.scrollHeight; }
+function clearLog() { logEl.textContent = ""; }
+const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";   // like Python's shlex.quote
+const chunk = (arr, n) => Array.from({ length: Math.ceil(arr.length / n) }, (_, i) => arr.slice(i * n, i * n + n));
+const validPkg = (n) => /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(n);
+
+// Run one command string in the phone's shell and return its output (stdout and stderr together).
+async function sh(cmd) { return (await adb.subprocess.noneProtocol.spawnWaitText(cmd)).replace(/\r/g, ""); }
+
+// Many commands, 50 per call, because each call is slow.
+async function runAll(cmds) { for (const c of chunk(cmds, 50)) await sh(c.join("; ")); }
+
+// A command per package, 40 packages per call, 4 calls at a time.
+async function inBatches(pkgs, cmdFor) {
+  const batches = chunk(pkgs, 40);
+  for (const group of chunk(batches, 4))
+    await Promise.all(group.map((b) => sh(b.map((p) => cmdFor(q(p))).join("; "))));
+}
+
+function firstError(out) {
+  const lines = out.split("\n").map((l) => l.trim()).filter((l) => l && !l.includes("Exception occurred"));
+  return lines.length ? lines[0].slice(0, 160) : "no reason given";
+}
+
+// Saved in this browser: the keep list (like ~/.config/phone-keep.json) and, per phone,
+// the old values RESTORE puts back (like ~/.config/phone-battery-backup.json).
+function loadJson(key, def) { try { const v = JSON.parse(localStorage.getItem(key)); return v ?? def; } catch { return def; } }
+function saveJson(key, v) { localStorage.setItem(key, JSON.stringify(v)); }
+const backupKey = () => "phone-battery-backup:" + serial;
+const loadBackup = () => loadJson(backupKey(), {});
+const saveBackup = (b) => saveJson(backupKey(), b);
+function loadKeep() { const k = loadJson("phone-keep", null); return Array.isArray(k) ? new Set(k) : null; }
+const saveKeep = (k) => saveJson("phone-keep", [...k].sort());
+
+// ---------- constants, same as the script ----------
+const SUGGESTED_KEEP = new Set(["com.whatsapp", "org.thoughtcrime.securesms", "com.discord", "org.telegram.messenger", "com.grupet.web.app"]);
+const ALWAYS_KEEP = new Set(["com.google.android.gms", "com.google.android.gsf", "com.sec.spp.push"]);
+const PROTECTED_APPS = /^android$|providers\.(settings|telephony)|shell|systemui|keyguard|permissioncontroller|setupwizard|provision|^com\.android\.phone$|packageinstaller|launcher|com\.miui\.(home|securitycenter)/;
+const SAVER_CONSTANTS = ["force_all_apps_standby=true", "force_background_check=true", "quick_doze_enabled=true",
+  "optional_sensors_disabled=true", "aod_disabled=true", "vibration_disabled=true", "launch_boost_disabled=true",
+  "soundtrigger_disabled=true", "fullbackup_deferred=true", "keyvaluebackup_deferred=true", "enable_night_mode=true"].join(",");
+// [namespace, key, value, Samsung-only (set only if the phone already has it), what it is]
+const BATTERY_SETTINGS = [
+  ["global", "mobile_data_always_on", "0", false, "Mobile data stays on while on Wi-Fi: off"],
+  ["global", "wifi_scan_always_enabled", "0", false, "Wi-Fi scanning while Wi-Fi is off: off"],
+  ["global", "ble_scan_always_enabled", "0", false, "Bluetooth scanning while Bluetooth is off: off"],
+  ["global", "wifi_networks_available_notification_on", "0", false, "Open Wi-Fi network alerts: off"],
+  ["global", "cached_apps_freezer", "enabled", false, "Freeze apps in the background (after a restart)"],
+  ["global", "adaptive_battery_management_enabled", "1", false, "Adaptive battery: on"],
+  ["global", "low_power_sticky", "1", false, "Power saving stays on after a restart"],
+  ["global", "battery_saver_constants", SAVER_CONSTANTS, false, "Stronger power saving mode"],
+  ["global", "window_animation_scale", "0.5", false, "Window animations 0.5x"],
+  ["global", "transition_animation_scale", "0.5", false, "Transition animations 0.5x"],
+  ["global", "animator_duration_scale", "0.5", false, "Animator duration 0.5x"],
+  ["secure", "doze_always_on", "0", false, "Always On Display (Android): off"],
+  ["secure", "aod_mode", "0", true, "Always On Display (Samsung): off"],
+  ["secure", "aod_tap_to_show_mode", "0", true, "Tap to show AOD: off"],
+  ["secure", "doze_pulse_on_pick_up", "0", false, "Screen lights up when picked up: off"],
+  ["secure", "doze_tap_gesture", "0", false, "Screen lights up on tap: off"],
+  ["secure", "wake_gesture_enabled", "0", false, "Wake gesture: off"],
+  ["secure", "screensaver_enabled", "0", false, "Screen saver: off"],
+  ["secure", "refresh_rate_mode", "0", true, "Motion smoothness: Standard 60 Hz"],
+  ["system", "screen_off_timeout", "30000", false, "Screen timeout: 30 seconds"],
+  ["system", "haptic_feedback_enabled", "0", false, "Touch vibration: off"],
+  ["system", "sound_effects_enabled", "0", false, "Touch sounds: off"],
+  ["system", "dtmf_tone", "0", false, "Dial pad tones: off"],
+  ["system", "lockscreen_sounds_enabled", "0", false, "Lock sounds: off"],
+  ["system", "double_tab_to_wake_up", "0", true, "Double tap to turn on screen: off"],
+  ["system", "lift_to_wake", "0", true, "Lift to wake: off"],
+  ["system", "nearby_scanning_enabled", "0", true, "Nearby device scanning: off"],
+  ["system", "edge_enable", "0", true, "Edge panels: off"],
+];
+// Deep sleep (Doze) timers in ms.
+const DOZE_CONSTANTS = { light_after_inactive_to: "10000", inactive_to: "30000", sensing_to: "0",
+  locating_to: "0", motion_inactive_to: "0", idle_after_inactive_to: "0" };
+// START_FOREGROUND is left alone on purpose: denying it makes some apps crash and restart in a loop.
+const RESTRICT_OPS = ["RUN_ANY_IN_BACKGROUND", "RUN_IN_BACKGROUND", "WAKE_LOCK"];
+// Optimize also blocks foreground services, like the script's optimize tool.
+const OPTIMIZE_OPS = ["RUN_IN_BACKGROUND", "RUN_ANY_IN_BACKGROUND", "WAKE_LOCK", "START_FOREGROUND"];
+const RADIOS = [  // [name, state command, on, off]
+  ["Wi-Fi", "settings get global wifi_on", "svc wifi enable", "svc wifi disable"],
+  ["Mobile data", "settings get global mobile_data", "svc data enable", "svc data disable"],
+  ["Bluetooth", "settings get global bluetooth_on", "cmd bluetooth_manager enable", "cmd bluetooth_manager disable"],
+  ["NFC", "dumpsys nfc | grep -m1 mState=", "svc nfc enable", "svc nfc disable"],
+  ["Location", "cmd location is-location-enabled", "cmd location set-location-enabled true", "cmd location set-location-enabled false"],
+];
+
+// ---------- parsers (same rules as the script's) ----------
+const packageNames = (t) => new Set(t.split("\n").filter((l) => l.startsWith("package:")).map((l) => l.slice(8).trim()));
+function parsePackagePaths(t) {  // {package: apk path}
+  const out = {};
+  for (const l of t.split("\n")) if (l.startsWith("package:") && l.includes("=")) { const i = l.lastIndexOf("="); out[l.slice(i + 1).trim()] = l.slice(8, i); }
+  return out;
+}
+const parseLauncher = (t) => new Set([...t.matchAll(/^\s*([\w.]+)\//gm)].map((m) => m[1]));
+function parseMarked(t) {  // {name: value} from lines of "#name=value"
+  const out = {};
+  for (const l of t.split("\n")) if (l.startsWith("#") && l.includes("=")) { const i = l.indexOf("="); out[l.slice(1, i)] = l.slice(i + 1); }
+  return out;
+}
+const parseUserWhitelist = (t) => new Set(t.split("\n").map((l) => l.trim().split(",")).filter((r) => r.length >= 2 && r[0] === "user").map((r) => r[1]));
+const parseUidList = (t) => t.includes(":") ? new Set(t.split(":").slice(1).join(":").match(/\d+/g) || []) : new Set();
+const radioOn = (o) => { o = o.trim(); return ["1", "2", "true"].includes(o) || o.includes("mState=on"); };
+
+// App table and friendly names, read from the script's tiers() and label() so they are never out of date.
+async function loadTables() {
+  const src = await (await fetch("battery-optimizer-linux.sh")).text();
+  const table = src.split("tiers() {\n  cat <<'EOF'\n")[1].split("\nEOF")[0];
+  for (const line of table.split("\n")) {
+    const m = line.match(/^([23]) (\S+) (.+)$/);
+    if (m) TIERS[m[2]] = [Number(m[1]), m[3]];
+  }
+  for (const m of src.matchAll(/^\s+([\w.]+)\) echo "([^"]+)";;$/gm)) LABELS[m[1]] = m[2];
+}
+const tierOf = (p, user) => user.has(p) ? 1 : (TIERS[p]?.[0] ?? 4);
+function nameOf(p) {
+  const n = LABELS[p] || TIERS[p]?.[1];
+  if (n) return n;
+  const part = p.split(".")[1] || p;   // like the script: second part of the id, capitalized
+  return part[0].toUpperCase() + part.slice(1);
+}
+const rowText = (p) => `${nameOf(p)} (${p})`;
+
+// ---------- connect ----------
+async function connect() {
+  const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
+  if (!manager) { clearLog(); log("This browser has no WebUSB. Use Chrome or Edge on a computer."); return; }
+  const device = await manager.requestDevice();
+  if (!device) return;
+  clearLog();
+  let connection;
+  try { connection = await device.connect(); }
+  catch (e) { log(`Could not open the phone: ${e.message}\nClose other ADB programs (run "adb kill-server") and unplug and replug the phone.`); return; }
+  log("Accept the USB debugging prompt on the phone...");
+  const transport = await AdbDaemonTransport.authenticate({ serial: device.serial, connection,
+    credentialStore: new AdbWebCredentialStore("Battery Optimizer") });
+  adb = new Adb(transport);
+  serial = device.serial;
+  transport.disconnected.then(() => { if (adb) { adb = null; showConnected(false); log("Phone disconnected."); } });
+  await loadTables();
+  const model = (await sh("getprop ro.product.model")).trim();
+  $("#phoneName").textContent = "Connected: " + model;
+  log("Connected phone: " + model);
+  showConnected(true);
+}
+function showConnected(on) {
+  $("#connectCard").classList.toggle("hidden", on);
+  $("#toolsCard").classList.toggle("hidden", !on);
+  if (!on) $("#listCard").classList.add("hidden");
+}
+
+// ---------- app list screen (used by keep list, optimize, autostart, mobile data per app) ----------
+// rows: [{id, text, cls, checked}] or {head: "text"}; actions: [{label, primary, run(checkedIds, allIds)}]
+function showList(title, help, rows, actions) {
+  $("#listTitle").textContent = title;
+  $("#listHelp").textContent = help;
+  const list = $("#list");
+  list.replaceChildren(...rows.map((r) => {
+    if (r.head) { const d = document.createElement("div"); d.className = "head"; d.textContent = r.head; return d; }
+    const l = document.createElement("label");
+    l.innerHTML = `<input type="checkbox"><span></span>`;
+    l.firstChild.checked = !!r.checked; l.firstChild.value = r.id;
+    l.lastChild.textContent = r.text; if (r.cls) l.lastChild.className = r.cls;
+    return l;
+  }));
+  $("#listFilter").value = "";
+  $("#listActions").replaceChildren(...actions.map((a) => {
+    const b = document.createElement("button");
+    b.textContent = a.label; if (a.primary) b.className = "primary";
+    b.onclick = () => busy(() => a.run(
+      [...list.querySelectorAll("input:checked")].map((i) => i.value),
+      [...list.querySelectorAll("input")].map((i) => i.value)));
+    return b;
+  }), Object.assign(document.createElement("button"), { textContent: "Close", onclick: () => $("#listCard").classList.add("hidden") }));
+  $("#listCard").classList.remove("hidden");
+  $("#listCard").scrollIntoView({ behavior: "smooth" });
+}
+$("#listFilter").oninput = (e) => {
+  const f = e.target.value.toLowerCase();
+  for (const l of $("#list").querySelectorAll("label")) l.style.display = l.textContent.toLowerCase().includes(f) ? "" : "none";
+};
+const shownBoxes = () => [...$("#list").querySelectorAll("label")].filter((l) => l.style.display !== "none").map((l) => l.firstChild);
+$("#listAll").onclick = () => shownBoxes().forEach((b) => (b.checked = true));
+$("#listNone").onclick = () => shownBoxes().forEach((b) => (b.checked = false));
+
+// ---------- battery tool (port of the script's battery section) ----------
+async function readSettings() {
+  return parseMarked(await sh(BATTERY_SETTINGS.map(([ns, key]) => `echo "#${ns}/${key}=$(settings get ${ns} ${key})"`).join("; ")));
+}
+async function readDoze() {
+  return parseMarked(await sh(Object.keys(DOZE_CONSTANTS).map((k) => `echo "#${k}=$(device_config get device_idle ${k})"`).join("; ")));
+}
+async function nightMode() { const m = (await sh("cmd uimode night")).match(/Night mode: (\w+)/); return m ? m[1] : null; }
+
+// Home screen, keyboard, calls, SMS, assistant, accessibility, notification listeners and VPN.
+async function essentialPackages() {
+  let text = await sh("cmd package resolve-activity --brief -c android.intent.category.HOME -a android.intent.action.MAIN");
+  for (const role of ["SMS", "DIALER", "HOME", "ASSISTANT"]) text += "\n" + (await sh(`cmd role get-role-holders android.app.role.${role}`)).replaceAll(";", "\n");
+  for (const key of ["default_input_method", "enabled_accessibility_services", "enabled_notification_listeners", "always_on_vpn_app"])
+    text += "\n" + (await sh(`settings get secure ${key}`)).replaceAll(":", "\n");
+  return new Set(text.split("\n").filter((l) => l.includes(".")).map((l) => l.trim().split(/[/\s]/)[0]));
+}
+
+async function applySettings(backup) {
+  const now = await readSettings();
+  const commands = [], missing = [];
+  for (const [ns, key, value, samsung, what] of BATTERY_SETTINGS) {
+    const old = now[`${ns}/${key}`] ?? "null";
+    if (samsung && old === "null") missing.push(what);
+    else if (old !== value) {
+      backup.settings ??= {}; backup.settings[`${ns}/${key}`] ??= old;
+      commands.push(`settings put ${ns} ${key} ${q(value)}`);
+    }
+  }
+  const night = await nightMode();
+  if (night && night !== "yes") { backup.night_mode ??= night; commands.push("cmd uimode night yes"); }
+  const power = (await sh("settings get global low_power")).trim();
+  if (power !== "1") { backup.power_saver ??= power; commands.push("cmd power set-mode 1"); }
+  saveBackup(backup);  // saved before changing anything, so RESTORE works even if this stops halfway
+  await runAll(commands);
+  const after = await readSettings();
+  const failed = BATTERY_SETTINGS.filter(([ns, key, value, , what]) => !missing.includes(what) && after[`${ns}/${key}`] !== value).map((s) => s[4]);
+  log(`  Settings: ${BATTERY_SETTINGS.length - missing.length - failed.length} set, dark mode and power saving on.`);
+  failed.forEach((w) => log("  FAILED: " + w));
+  if (missing.length) log("  Not on this phone (skipped): " + missing.join(", "));
+}
+
+async function applyDeepSleep(backup) {
+  const now = await readDoze();
+  const commands = [];
+  for (const [key, value] of Object.entries(DOZE_CONSTANTS)) {
+    if (now[key] !== value) {
+      backup.device_config ??= {}; backup.device_config[key] ??= (now[key] ?? "null");
+      commands.push(`device_config put device_idle ${key} ${value}`);
+    }
+  }
+  saveBackup(backup);
+  const reason = commands.length ? firstError(await sh(commands[0])) : "";
+  await runAll(commands.slice(1));
+  const doze = await readDoze();
+  const failed = Object.keys(DOZE_CONSTANTS).filter((k) => doze[k] !== DOZE_CONSTANTS[k]);
+  if (failed.length) {
+    // Newer Android only lets USB debugging change some of these flags. Nothing changed, so nothing to restore.
+    failed.forEach((k) => delete backup.device_config?.[k]);
+    saveBackup(backup);
+    log(`  Deep sleep: this phone does not allow changing the sleep timers over USB (${reason}).`);
+    log("  No problem: power saving with quick doze is on, so the phone still goes into deep sleep");
+    log("  right after the screen turns off. Keep power saving on to keep that.");
+  } else {
+    log("  Deep sleep: the phone now sleeps about 30 seconds after the screen turns off.");
+    log("  Apps not on the keep list may show messages a few minutes late while the screen is off.");
+  }
+}
+
+async function restrictedNow() {
+  return new Set((await sh("cmd appops query-op RUN_ANY_IN_BACKGROUND ignore")).split("\n").map((l) => l.trim()).filter((l) => l.includes(".") && validPkg(l)));
+}
+
+// Your apps and the safe preinstalled extras, minus the keep list and whatever the phone needs to work.
+async function batteryTargets(keep) {
+  const installed = packageNames(await sh("pm list packages"));
+  const user = packageNames(await sh("pm list packages -3"));
+  const protect = new Set([...(await essentialPackages()), ...keep, ...ALWAYS_KEEP]);
+  const targets = [...installed].filter((p) => (user.has(p) || TIERS[p]?.[0] === 2) && !protect.has(p) && !PROTECTED_APPS.test(p)).sort();
+  return { targets, installed };
+}
+
+async function restrictApps(keep, backup) {
+  const { targets, installed } = await batteryTargets(keep);
+  const before = await restrictedNow();
+  const unrestricted = parseUserWhitelist(await sh("dumpsys deviceidle whitelist"));
+  // Only what the Battery tool changes is remembered, so RESTORE leaves apps you optimized before alone.
+  backup.restricted = [...new Set([...(backup.restricted || []), ...targets.filter((p) => !before.has(p))])].sort();
+  backup.whitelist_removed = [...new Set([...(backup.whitelist_removed || []), ...targets.filter((p) => unrestricted.has(p))])].sort();
+  saveBackup(backup);
+  // am kill stops what runs right now but the app still works normally when you open it.
+  await inBatches(targets, (p) => [...RESTRICT_OPS.map((op) => `cmd appops set ${p} ${op} ignore`),
+    `am set-standby-bucket ${p} restricted`, `dumpsys deviceidle whitelist -${p} >/dev/null 2>&1`, `am kill ${p}`].join("; "));
+  const kept = [...keep].filter((p) => installed.has(p)).sort();
+  await inBatches(kept, (p) => [...[...RESTRICT_OPS, "START_FOREGROUND"].map((op) => `cmd appops set ${p} ${op} allow`),
+    `am set-standby-bucket ${p} active`].join("; "));
+  const now = await restrictedNow();
+  const done = targets.filter((p) => now.has(p)).length;
+  log(`  Apps: ${done} of ${targets.length} restricted, ${kept.length} on the keep list left free.`);
+  if (done < targets.length) log(`  ${targets.length - done} refused the restriction (usually system parts that do not allow it).`);
+}
+
+async function packageUids() { return Object.fromEntries([...(await sh("pm list packages -U")).matchAll(/^package:(\S+) uid:(\d+)/gm)].map((m) => [m[1], m[2]])); }
+async function uidList(kind) { return parseUidList(await sh(`cmd netpolicy list restrict-background-${kind}`)); }
+async function dataSaverOn() { return (await sh("cmd netpolicy get restrict-background")).includes("enabled"); }
+
+async function blockBackgroundData(keep, backup) {
+  const uids = await packageUids();
+  const allow = new Set([...keep, ...ALWAYS_KEEP, ...(await essentialPackages())].filter((p) => p in uids).map((p) => uids[p]));
+  const white = await uidList("whitelist");
+  const fresh = [...allow].filter((u) => !white.has(u)).sort();
+  backup.data_saver ??= await dataSaverOn();
+  backup.data_allowed = [...new Set([...(backup.data_allowed || []), ...fresh])].sort();
+  saveBackup(backup);
+  await runAll([...fresh.map((u) => `cmd netpolicy add restrict-background-whitelist ${u}`), "cmd netpolicy set restrict-background true"]);
+  const white2 = await uidList("whitelist");
+  const missing = [...allow].filter((u) => !white2.has(u)).length;
+  if (await dataSaverOn()) {
+    log(`  Mobile data: no app uses mobile data in the background now, except ${allow.size - missing} kept ones.`);
+    log("  Wi-Fi is not affected. Hotspot may not work while Data Saver is on.");
+  } else log("  Mobile data: FAILED, Data Saver did not turn on.");
+  if (missing) log(`  ${missing} kept apps could not be allowed. Check them under Mobile data per app.`);
+}
+
+// Pick the apps that must keep working. Resolves to the saved set, or null if closed without saving.
+async function chooseKeep() {
+  log("Loading apps...");
+  const launcher = parseLauncher(await sh("cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER"));
+  const choices = new Set([...packageNames(await sh("pm list packages -3")), ...launcher]);
+  const installed = Object.keys(parsePackagePaths(await sh("pm list packages -f"))).filter((p) => choices.has(p));
+  const saved = loadKeep();
+  const keep = saved ?? new Set([...SUGGESTED_KEEP].filter((p) => installed.includes(p)));
+  const apps = installed.sort((a, b) => (keep.has(b) - keep.has(a)) || nameOf(a).localeCompare(nameOf(b)));
+  return new Promise((resolve) => {
+    showList("Keep list", "Tick the apps that must keep working in the background (messages, school, banking). Everything else gets restricted.",
+      apps.map((p) => ({ id: p, text: rowText(p), checked: keep.has(p) })),
+      [{ label: "Save keep list", primary: true, run: (checked) => {
+        const k = new Set(checked); saveKeep(k); log(`Keep list saved: ${k.size} apps.`);
+        $("#listCard").classList.add("hidden"); resolve(k);
+      } }]);
+    $("#listCard").querySelector("#listActions button:last-child").addEventListener("click", () => resolve(saved));
+  });
+}
+async function needKeep() {
+  const keep = loadKeep();
+  if (keep) return keep;
+  log("First choose the apps that must keep working in the background (messages, school, banking).");
+  return chooseKeep();
+}
+
+async function dataPerApp(backup) {
+  log("Loading apps...");
+  const apks = parsePackagePaths(await sh("pm list packages -f"));
+  const user = packageNames(await sh("pm list packages -3"));
+  const uids = await packageUids();
+  const apps = Object.keys(apks).filter((p) => (user.has(p) || TIERS[p]?.[0] === 2) && p in uids).sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+  const blocked = await uidList("blacklist");
+  showList("Background mobile data", "Ticked = blocked from using mobile data in the background. In the foreground and on Wi-Fi they work normally.",
+    apps.map((p) => ({ id: p, text: rowText(p), checked: blocked.has(uids[p]) })),
+    [{ label: "Apply", primary: true, run: async (checked, all) => {
+      const want = new Set(checked), record = new Set(backup.data_blocked || []), cmds = [];
+      const now = await uidList("blacklist");
+      for (const p of all) {
+        const u = uids[p];
+        if (want.has(p) && !now.has(u)) { cmds.push(`cmd netpolicy add restrict-background-blacklist ${u}`); record.add(u); }
+        if (!want.has(p) && now.has(u)) { cmds.push(`cmd netpolicy remove restrict-background-blacklist ${u}`); record.delete(u); }
+      }
+      backup.data_blocked = [...record].sort(); saveBackup(backup);
+      await runAll(cmds);
+      log(`Mobile data per app: ${cmds.length} changed.`);
+    } }]);
+}
+
+async function radios() {
+  const states = [];
+  for (const [, state] of RADIOS) states.push(radioOn(await sh(state)));
+  showList("Radios", "Ticked = on. Change the ticks and press Apply.",
+    RADIOS.map(([name], i) => ({ id: String(i), text: name, checked: states[i] })),
+    [{ label: "Apply", primary: true, run: async (checked) => {
+      for (const [i, [name, , on, off]] of RADIOS.entries()) {
+        const want = checked.includes(String(i));
+        if (want !== states[i]) { await sh(want ? on : off); states[i] = want; log(`${name}: ${want ? "on" : "off"}`); }
+      }
+    } }]);
+}
+
+async function batteryStatus() {
+  const keep = loadKeep();
+  const level = (await sh("dumpsys battery")).match(/level: (\d+)/);
+  log(`\nBattery: ${level ? level[1] + "%" : "unknown"}`);
+  const power = (await sh("settings get global low_power")).trim() === "1";
+  const box = (b) => (b ? "[x]" : "[ ]");
+  log(`${box(power)} Power saving on`);
+  log(`${box((await nightMode()) === "yes")} Dark mode on`);
+  log(`${box(await dataSaverOn())} Background mobile data blocked (Data Saver)`);
+  const doze = await readDoze();
+  if (Object.entries(DOZE_CONSTANTS).every(([k, v]) => doze[k] === v)) log("[x] Deep sleep after 30 seconds");
+  else log(`${box(power)} Deep sleep right after screen off (quick doze, needs power saving on)`);
+  if (keep) {
+    const { targets } = await batteryTargets(keep);
+    const now = await restrictedNow();
+    const done = targets.filter((p) => now.has(p)).length;
+    log(`${box(done === targets.length)} Apps restricted: ${done} of ${targets.length} (${keep.size} on the keep list)`);
+  } else log("[ ] Apps: no keep list yet");
+  const now = await readSettings();
+  for (const [ns, key, value, samsung, what] of BATTERY_SETTINGS) {
+    const old = now[`${ns}/${key}`] ?? "null";
+    if (samsung && old === "null") continue;
+    log(`${box(old === value)} ${what}`);
+  }
+}
+
+async function maxBattery() {
+  const keep = await needKeep();
+  if (!keep) { log("Cancelled."); return; }
+  log(`\nKeeping ${keep.size} apps free: ${[...keep].sort().join(", ") || "none"}`);
+  if (prompt("This turns on power saving, dark mode and deep sleep, switches off everything that drains in the background, " +
+    "and restricts every other app. RESTORE undoes all of it.\n\nType GO to start:") !== "GO") { log("Cancelled."); return; }
+  const backup = loadBackup();
+  log("1/4 Settings..."); await applySettings(backup);
+  log("2/4 Deep sleep..."); await applyDeepSleep(backup);
+  log("3/4 Apps..."); await restrictApps(keep, backup);
+  log("4/4 Background mobile data...");
+  if (confirm("Block background mobile data for every app not on the keep list?")) await blockBackgroundData(keep, backup);
+  else log("  Skipped.");
+  log("\nDone. Restart the phone once so the app freezer turns on.");
+  log("Run MAX BATTERY again after installing new apps or after a system update.");
+}
+
+async function restoreAll() {
+  const backup = loadBackup();
+  if (!Object.keys(backup).length) { log("The Battery tool has not changed anything on this phone from this browser yet."); return; }
+  if (!confirm("Undo everything the Battery tool changed?")) { log("Cancelled."); return; }
+  const cmds = [];
+  for (const [name, old] of Object.entries(backup.settings || {})) {
+    const [ns, key] = [name.slice(0, name.indexOf("/")), name.slice(name.indexOf("/") + 1)];
+    cmds.push(old === "null" ? `settings delete ${ns} ${key}` : `settings put ${ns} ${key} ${q(old)}`);
+  }
+  for (const [key, old] of Object.entries(backup.device_config || {}))
+    cmds.push(old === "null" ? `device_config delete device_idle ${key}` : `device_config put device_idle ${key} ${q(old)}`);
+  if (backup.night_mode) cmds.push(`cmd uimode night ${q(backup.night_mode)}`);
+  if ("power_saver" in backup && backup.power_saver !== "1") cmds.push("cmd power set-mode 0");
+  cmds.push(...(backup.data_allowed || []).map((u) => `cmd netpolicy remove restrict-background-whitelist ${u}`));
+  cmds.push(...(backup.data_blocked || []).map((u) => `cmd netpolicy remove restrict-background-blacklist ${u}`));
+  if (backup.data_saver === false) cmds.push("cmd netpolicy set restrict-background false");
+  await runAll(cmds);
+  await inBatches(backup.restricted || [], (p) => [...RESTRICT_OPS.map((op) => `cmd appops set ${p} ${op} default`), `am set-standby-bucket ${p} active`].join("; "));
+  await inBatches(backup.whitelist_removed || [], (p) => `dumpsys deviceidle whitelist +${p} >/dev/null 2>&1`);
+  localStorage.removeItem(backupKey());
+  log("Restored. Apps you optimized with the Optimize tab were left as they were.");
+  log("Restart the phone once so the app freezer goes back to normal.");
+}
+
+// ---------- optimize / autostart (port of the script's appops tool) ----------
+async function appopsList(autostart) {
+  log("Loading apps...");
+  const ops = autostart ? ["RUN_ANY_IN_BACKGROUND"] : OPTIMIZE_OPS;
+  let all = [...packageNames(await sh("pm list packages"))];
+  if (autostart) {  // only apps that ask to be started at boot
+    const out = await sh("for a in BOOT_COMPLETED LOCKED_BOOT_COMPLETED; do cmd package query-receivers --brief -a android.intent.action.$a --include-stopped-packages; done");
+    const boot = new Set(out.split("\n").map((l) => l.replace(/\s/g, "")).filter((l) => l.includes("/")).map((l) => l.split("/")[0]));
+    all = all.filter((p) => boot.has(p));
+  }
+  const user = packageNames(await sh("pm list packages -3"));
+  let full = new Set(all);   // green = every op set to ignore
+  for (const op of ops) {
+    const ign = new Set((await sh(`cmd appops query-op ${op} ignore`)).split("\n").map((l) => l.trim()).filter(validPkg));
+    full = new Set([...full].filter((p) => ign.has(p)));
+  }
+  return { ops, user, full, apps: all.sort((a, b) => (tierOf(a, user) - tierOf(b, user)) || nameOf(a).localeCompare(nameOf(b))) };
+}
+async function setOps(pkgs, ops, value, extra) {
+  await inBatches(pkgs, (p) => [...ops.map((op) => `cmd appops set ${p} ${op} ${value}`), ...extra(p)].join("; "));
+}
+const HEADS = { 1: "YOUR APPS - safe", 2: "PREINSTALLED EXTRAS - safe", 3: "SYSTEM PARTS - possible, NOT recommended", 4: "CRITICAL SYSTEM - turn these back on" };
+function tierRows(apps, user, full, label) {
+  const rows = []; let last = null;
+  for (const p of apps) {
+    const t = tierOf(p, user);
+    if (t === 4 && !full.has(p)) continue;   // critical parts are hidden unless they need turning back on
+    if (t !== last) { last = t; rows.push({ head: HEADS[t] }); }
+    rows.push({ id: p, text: label(p), cls: full.has(p) ? "green" : t === 3 ? "yellow" : "" });
+  }
+  return rows;
+}
+async function optimizeTool() {
+  const { ops, user, full, apps } = await appopsList(false);
+  const reopen = async (msg) => { log(msg); await optimizeTool(); };
+  showList("Optimize apps", "Green = fully optimized. Yellow = not recommended. Tick apps, then Optimize or Unoptimize.",
+    tierRows(apps, user, full, rowText),
+    [{ label: "Optimize ticked", primary: true, run: async (c) => { await setOps(c, ops, "ignore", (p) => [`am force-stop ${p}`, `am set-standby-bucket ${p} restricted`]); await reopen(`Optimized ${c.length}.`); } },
+     { label: "Unoptimize ticked", run: async (c) => { await setOps(c, ops, "allow", (p) => [`am set-standby-bucket ${p} active`]); await reopen(`Unoptimized ${c.length}.`); } },
+     { label: "Reapply all green", run: async () => { const g = [...full]; await setOps(g, ops, "ignore", (p) => [`am force-stop ${p}`, `am set-standby-bucket ${p} restricted`]); await reopen(`Reapplied ${g.length}.`); } }]);
+  log(`${apps.length} apps, ${full.size} optimized.`);
+}
+async function autostartTool() {
+  const { ops, user, full, apps } = await appopsList(true);
+  showList("Autostart", "[ON] = starts when the phone boots. Green [OFF] = blocked. Tick apps, then Block or Allow.",
+    tierRows(apps, user, full, (p) => `${full.has(p) ? "[OFF]" : "[ON] "} ${rowText(p)}`),
+    [{ label: "Block ticked", primary: true, run: async (c) => { await setOps(c, ops, "ignore", () => []); log(`Blocked ${c.length}.`); await autostartTool(); } },
+     { label: "Allow ticked", run: async (c) => { await setOps(c, ops, "allow", () => []); log(`Allowed ${c.length}.`); await autostartTool(); } }]);
+  log(`${apps.length} apps start at boot, ${full.size} blocked.`);
+}
+
+// ---------- wiring ----------
+// One action at a time: buttons are disabled while the phone is busy, and errors are shown instead of lost.
+async function busy(fn) {
+  const buttons = [...document.querySelectorAll("button")];
+  buttons.forEach((b) => (b.disabled = true));
+  try { await fn(); }
+  catch (e) { log("Error: " + (e?.message || e)); console.error(e); }
+  finally { buttons.forEach((b) => (b.disabled = false)); }
+}
+const ACTIONS = {
+  max: maxBattery,
+  keep: chooseKeep,
+  apps: async () => { const k = await needKeep(); if (k) await restrictApps(k, loadBackup()); },
+  data: async () => { const k = await needKeep(); if (k) await blockBackgroundData(k, loadBackup()); },
+  dataPerApp: () => dataPerApp(loadBackup()),
+  settings: () => applySettings(loadBackup()),
+  sleep: () => applyDeepSleep(loadBackup()),
+  radios, status: batteryStatus, restore: restoreAll,
+  optimize: optimizeTool, autostart: autostartTool,
+};
+// Keep list and other lists wait for the user, so they run outside busy() to keep their buttons clickable.
+const WAITS_FOR_LIST = new Set(["max", "keep", "apps", "data"]);
+document.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => {
+  const fn = ACTIONS[b.dataset.act];
+  WAITS_FOR_LIST.has(b.dataset.act) ? fn().catch((e) => log("Error: " + (e?.message || e))) : busy(fn);
+}));
+document.querySelectorAll("[data-tab]").forEach((t) => (t.onclick = () => {
+  document.querySelectorAll("[data-tab]").forEach((o) => o.setAttribute("aria-selected", o === t));
+  for (const name of ["battery", "optimize", "autostart"]) $("#tab-" + name).classList.toggle("hidden", name !== t.dataset.tab);
+}));
+$("#connectBtn").onclick = () => connect().catch((e) => log("Could not connect: " + (e?.message || e)));
+$("#disconnectBtn").onclick = async () => { const a = adb; adb = null; showConnected(false); log("Disconnected."); await a?.close(); };
+</script>
+</body>
+</html>

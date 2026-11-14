@@ -1,8 +1,11 @@
-# Battery Optimizer for Android (runs on Linux)
+# Battery Optimizer for Android (Linux, Windows and browser)
 
-**Make your Android phone's battery last much longer, controlled from your Linux computer over a USB cable.**
+**Make your Android phone's battery last much longer, controlled from your computer over a USB cable.**
 
 No root needed. No app to install on the phone. One script, one menu.
+
+> 🌐 **Try it in the browser:** https://azp3001.github.io/battery-optimizer/
+> ⚠️ The website is **experimental** and **not recommended over the scripts yet**. It only has the Battery, Optimize and Autostart tools, and it has not been tested as much. For now, use the Linux script or the Windows file below.
 
 ## What it does, in plain words
 
@@ -16,27 +19,32 @@ Most battery drain happens while the phone is in your pocket: apps wake up, run 
 
 Apps are restricted **once**, not killed over and over. Killing apps on a timer makes them restart, and restarting costs more battery than letting them sleep.
 
-## What you need
+## First: turn on USB debugging on the phone
 
-- A **Linux** computer (it is a bash script)
-- `adb` (Android platform tools), `fzf` (menus) and `python3` 3.12 or newer
-- An Android phone with **USB debugging** turned on
+1. Settings > About phone > tap **Build number** 7 times.
+2. Settings > Developer options > turn on **USB debugging**.
+3. Plug the phone into the computer and tap **Allow** on the phone.
 
-Install the tools (Debian / Ubuntu):
+## Windows
+
+1. From the [Releases](https://github.com/AZP3001/battery-optimizer/releases) page, download **both** `battery-optimizer-windows.bat` and `battery-optimizer-linux.sh` into the same folder.
+2. **Double-click** `battery-optimizer-windows.bat`.
+
+That's it. The first start downloads the tools it needs by itself (about 130 MB, once) into `%LOCALAPPDATA%\battery-optimizer`. You don't have to install anything. Then the same menu as on Linux opens. Nothing is done to the phone until you choose it in the menu.
+
+If the `.bat` is on its own, it fetches the latest script from GitHub.
+
+Needs Windows 10 (version 1803) or newer. If the phone does not show up, Windows may need the phone's USB driver (Samsung: *Samsung USB Driver*, Pixel: *Google USB Driver*).
+
+## Linux
+
+You need `adb` (Android platform tools), `fzf` (menus) and `python3` 3.12 or newer.
 
 ```bash
 sudo apt install adb fzf python3
 ```
 
 Fedora: `sudo dnf install android-tools fzf python3` · Arch: `sudo pacman -S android-tools fzf python`
-
-### Turn on USB debugging on the phone
-
-1. Settings > About phone > tap **Build number** 7 times.
-2. Settings > Developer options > turn on **USB debugging**.
-3. Plug the phone into the computer and tap **Allow** on the phone.
-
-## How to use it
 
 Download `battery-optimizer-linux.sh` from the [Releases](https://github.com/AZP3001/battery-optimizer/releases) page, then:
 
@@ -48,13 +56,15 @@ chmod +x battery-optimizer-linux.sh
 ./battery-optimizer-linux.sh battery
 ```
 
-Choose **MAX BATTERY**, pick your keep list, type `GO`. Done. Restart the phone once afterwards.
+## How to use it
+
+Open the **Battery** tool, choose **MAX BATTERY**, pick your keep list, type `GO`. Done. Restart the phone once afterwards.
 
 Use the arrow keys to move, **Enter** to choose, **Tab** to select several, **Esc** to go back.
 
 ## All tools
 
-Run `./battery-optimizer-linux.sh` with no argument for a menu of everything, or name a tool directly:
+Run the script with no argument for a menu of everything, or name a tool directly (on Windows, double-click opens the menu):
 
 | Command | What it does |
 |---|---|
@@ -86,3 +96,12 @@ The built-in app lists know Samsung, Google and Nothing apps best. Other brands 
 | `~/.config/phone-battery-backup.json` | Old values, used by RESTORE |
 | `~/.config/phone-cleanup-exceptions.json` | Apps never closed by "free RAM" |
 | `~/.cache/phone-cleanup-*.json` | Cached app names (safe to delete) |
+
+On Windows `~` is your user folder (`C:\Users\<you>`). The website keeps the keep list and the RESTORE backup in the browser instead, so clearing the site's data loses them.
+
+## For developers
+
+- `battery-optimizer-linux.sh`: the whole tool (bash and Python). The Windows `.bat` only downloads the tools and runs this same file.
+- `web/`: the website. `web/webadb.js` is a bundle of [ya-webadb](https://github.com/yume-chan/ya-webadb) (MIT) that talks to the phone over WebUSB. The page reads its app table from the script.
+- Every push to `main` that touches the website or the scripts republishes GitHub Pages automatically.
+- To make a release: Actions > Release > Run workflow, enter the version (for example `v1.1`).

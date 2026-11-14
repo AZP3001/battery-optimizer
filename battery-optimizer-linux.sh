@@ -5,7 +5,8 @@
 #   ./battery-optimizer-linux.sh help      what every tool does
 # Layout: small bash front end, the app list tool (appops), then the cleanup tool (Python) at the bottom.
 self=$(realpath "$0")
-export PHONE_SELF="$self"   # the Python part calls back here for the shared app table
+# the Python part calls back here for the shared app table (as a Windows path when run from the .bat)
+export PHONE_SELF=$(cygpath -w "$self" 2>/dev/null || echo "$self")
 
 # Install an APK over USB. Handles normal APKs and split-APK bundles (.apks/.xapk/.apkm).
 install_apk() {
@@ -515,9 +516,13 @@ case "$mode" in
 esac
 }
 
-# The cleanup / permissions tool. Script comes in on fd 3 so the keyboard stays on stdin.
+# The cleanup / permissions / battery tool (Python). It is written to a temp file and run from there,
+# so the keyboard stays on stdin (this also works on Windows, where /dev/fd does not exist for Python).
+# PYTHON is set by the Windows .bat; on Linux it is python3. -X utf8 keeps app names readable on Windows.
 cleanup() {
-python3 /dev/fd/3 "$@" 3<<'PY'
+local py rc
+py=$(mktemp) || return 1
+cat > "$py" <<'PY'
 #!/usr/bin/env python3
 """cleanup: choose what to permanently delete from the USB-connected phone."""
 import getpass
@@ -1047,7 +1052,9 @@ def parse_tiers(text):
 
 def load_tiers():
     # One shared table for optimize and cleanup, kept in the appops part of this file.
-    r = subprocess.run([os.environ["PHONE_SELF"], "_appops", "tiers"], capture_output=True, text=True)
+    # Started through bash so it also works on Windows, where a .sh file cannot be run directly.
+    r = subprocess.run([shutil.which("bash") or "bash", os.environ["PHONE_SELF"], "_appops", "tiers"],
+                       capture_output=True, text=True)
     return parse_tiers(r.stdout)
 
 
@@ -2404,6 +2411,10 @@ def main():
 if __name__ == "__main__":
     main()
 PY
+"${PYTHON:-python3}" -X utf8 "$py" "$@"
+rc=$?
+rm -f "$py"
+return $rc
 }
 
 # Entry point of the script: no argument opens the main menu, otherwise go straight to one tool.
