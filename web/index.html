@@ -23,10 +23,10 @@
 
   /* top bar: brand, tabs, phone status */
   header { position:sticky; top:0; z-index:20; background:var(--surface); border-bottom:1px solid var(--line); }
-  .bar { max-width:1180px; margin:0 auto; padding:0 20px; display:flex; align-items:center; gap:20px; min-height:60px; flex-wrap:wrap; }
+  .bar { margin:0 auto; padding:0 20px; display:flex; align-items:center; gap:20px; min-height:60px; flex-wrap:wrap; }
   .brand { font-weight:700; font-size:17px; display:flex; align-items:center; gap:8px; white-space:nowrap; }
   .brand svg { color:var(--green); }
-  nav { display:flex; gap:4px; flex:1; overflow-x:auto; }
+  nav { display:flex; gap:4px; flex:1; flex-wrap:wrap; justify-content:center; }
   nav button { background:none; border:0; padding:18px 14px 16px; color:var(--muted); cursor:pointer; border-bottom:2px solid transparent; white-space:nowrap; }
   nav button:hover { color:var(--text); }
   nav button[aria-selected="true"] { color:var(--text); border-bottom-color:var(--accent); }
@@ -165,6 +165,9 @@
   .app .switch { margin-left:4px; }
   dialog { width:min(600px, calc(100vw - 32px)); max-height:calc(100vh - 48px); }
   input[type=file] { color:var(--muted); }
+  /* install tab */
+  .drop { display:flex; flex-direction:column; align-items:center; gap:4px; padding:36px 20px; margin-bottom:16px; border:2px dashed var(--line); border-radius:var(--radius); cursor:pointer; text-align:center; }
+  .drop:hover, .drop.over { border-color:var(--accent); background:var(--accent-soft); }
   /* storage tab */
   .usage { display:flex; height:14px; border-radius:999px; overflow:hidden; background:var(--surface2); margin:14px 0 12px; }
   .usage span { height:100%; }
@@ -195,6 +198,7 @@
       <button role="tab" data-tab="permissions">Permissions</button>
       <button role="tab" data-tab="radios">Radios</button>
       <button role="tab" data-tab="storage">Storage</button>
+      <button role="tab" data-tab="install">Install</button>
       <button role="tab" data-tab="cleanup">Cleanup</button>
     </nav>
     <div class="phone"><span class="dot" id="dot"></span><span id="phoneName" class="muted">Not connected</span>
@@ -298,6 +302,16 @@
     <div class="applybar" id="storageBar"></div>
   </section>
 
+  <!-- Install: .apk files and split bundles from this computer -->
+  <section id="tab-install" class="hidden">
+    <h1>Install apps</h1>
+    <p class="lead">Add .apk files or split bundles (.apks, .xapk, .apkm). Each one shows its name, version and what is already on the phone. Nothing is installed until you press Install.</p>
+    <label class="drop" id="drop"><input type="file" id="installFiles" multiple accept=".apk,.apks,.xapk,.apkm" hidden>
+      <b>Drop files here</b><span class="muted">or click to choose</span></label>
+    <div class="list" id="installList"></div>
+    <div class="applybar"><span class="muted" id="installInfo"></span><button class="btn" id="installClear">Clear list</button><button class="btn primary" id="installGo" disabled>Install</button></div>
+  </section>
+
   <!-- Cleanup: everything from the script's cleanup tool. Deletes ask for the phone's screen lock. -->
   <section id="tab-cleanup" class="hidden">
     <div class="perm-layout">
@@ -319,7 +333,7 @@
 // It sends the same shell commands to the phone, over WebUSB instead of the adb program.
 // The battery constants and functions below mirror the script's Python part; keep them in sync.
 import { Adb, AdbDaemonTransport, AdbDaemonWebUsbDeviceManager, AdbWebCredentialStore } from "./webadb.js";
-import { appLabel, iconResource, iconFiles, adaptiveLayers, languageBytes, isPicture } from "./apk.js";
+import { appLabel, xmlAttrs, iconResource, iconFiles, adaptiveLayers, languageBytes, isPicture } from "./apk.js";
 
 const $ = (s) => document.querySelector(s);
 let adb = null, serial = "";
@@ -530,10 +544,19 @@ async function restrictedNow() {
   return new Set((await sh("cmd appops query-op RUN_ANY_IN_BACKGROUND ignore")).split("\n").map((l) => l.trim()).filter((l) => l.includes(".") && validPkg(l)));
 }
 
+// Apps installed by the user: "pm list packages -3", plus every package that is not a system package,
+// because some phones leave user-installed apps out of "-3".
+async function userPackages(all) {
+  const user = packageNames(await sh("pm list packages -3"));
+  const system = packageNames(await sh("pm list packages -s"));
+  for (const p of all) if (!system.has(p)) user.add(p);
+  return user;
+}
+
 // Your apps and the safe preinstalled extras, minus the keep list and whatever the phone needs to work.
 async function batteryTargets(keep) {
   const installed = packageNames(await sh("pm list packages"));
-  const user = packageNames(await sh("pm list packages -3"));
+  const user = await userPackages(installed);
   const protect = new Set([...(await essentialPackages()), ...keep, ...ALWAYS_KEEP]);
   const targets = [...installed].filter((p) => (user.has(p) || TIERS[p]?.[0] === 2) && !protect.has(p) && !PROTECTED_APPS.test(p)).sort();
   return { targets, installed };
@@ -740,7 +763,7 @@ const pull = (apk, file) => adb.subprocess.noneProtocol.spawnWait(`unzip -p ${q(
 
 async function decode(bytes) { return createImageBitmap(new Blob([bytes])); }
 // Draws the icon into a 96 px rounded square and returns it as a data URL, or "" if there is no picture.
-async function makeIcon(apk, manifest, arsc) {
+async function makeIcon(get, manifest, arsc) {
   const res = iconResource(manifest);
   if (!res || !arsc?.length) return "";
   const files = iconFiles(arsc, res);
@@ -749,17 +772,17 @@ async function makeIcon(apk, manifest, arsc) {
   g.beginPath(); g.roundRect(0, 0, 96, 96, 22); g.clip();
   const pic = files.find(isPicture);
   if (pic) {
-    g.drawImage(await decode(await pull(apk, pic)), 0, 0, 96, 96);
+    g.drawImage(await decode(await get(pic)), 0, 0, 96, 96);
     return c.toDataURL("image/webp", 0.9);
   }
   const xml = files.find((f) => f.endsWith(".xml"));
   if (!xml) return "";
-  const { foreground, background } = adaptiveLayers(await pull(apk, xml), arsc);
+  const { foreground, background } = adaptiveLayers(await get(xml), arsc);
   if (!foreground?.file) return "";   // drawn shapes (vector XML) are not supported, the letter icon stays
   // Adaptive icon layers are 108 units with the middle 72 visible, so they are drawn 1.5x and centered.
   const layer = async (l) => {
     if (l?.color) { g.fillStyle = "#" + l.color.slice(1, 7); g.fillRect(0, 0, 96, 96); }
-    else if (l?.file) g.drawImage(await decode(await pull(apk, l.file)), -24, -24, 144, 144);
+    else if (l?.file) g.drawImage(await decode(await get(l.file)), -24, -24, 144, 144);
   };
   await layer(background || { color: "#ffffffff" });
   await layer(foreground);
@@ -773,7 +796,7 @@ async function readMeta(apk, lang) {
   try { label = appLabel(manifest, arsc.length ? arsc : null, lang); } catch {}
   // "[Ðîĝîţåļ ...]" is Android's pseudo-locale test text, not a real name
   if (label.startsWith("[")) label = "";
-  try { icon = await makeIcon(apk, manifest, arsc); } catch {}
+  try { icon = await makeIcon((f) => pull(apk, f), manifest, arsc); } catch {}
   return { label, icon };
 }
 function applyMeta(a, m) {
@@ -841,7 +864,7 @@ const sortApps = () => APPS.sort((a, b) => a.tier - b.tier || a.name.localeCompa
 async function loadApps({ keepSide = false } = {}) {
   const old = Object.fromEntries(APPS.map((a) => [a.p, a]));
   const all = [...packageNames(await sh("pm list packages"))];
-  const user = packageNames(await sh("pm list packages -3"));
+  const user = await userPackages(all);
   const off = packageNames(await sh("pm list packages -d"));
   const ignored = {};
   for (const op of OPTIMIZE_OPS)
@@ -1423,21 +1446,6 @@ async function freeRam(hard) {
   if (before !== null && after !== null) log(`Free RAM: ${before} MB -> ${after} MB (${after - before >= 0 ? "+" : ""}${after - before} MB)`);
   log("Android restarts some services by itself, so a bit of this RAM gets used again.");
 }
-async function installApk(set) {
-  const file = $("#apkFile").files[0];
-  if (!file) { log("Choose an .apk file first."); return false; }
-  const tmp = "/data/local/tmp/battery-optimizer-install.apk";
-  let sent = 0;
-  const counted = file.stream().pipeThrough(new TransformStream({ transform(c, ctl) { sent += c.length; set(`Uploading ${Math.round(sent * 100 / file.size)}%`); ctl.enqueue(c); } }));
-  const sync = await adb.sync();
-  try { await sync.write({ filename: tmp, file: counted }); } finally { await sync.dispose(); }
-  set("Installing...");
-  const out = (await sh(`pm install -r ${q(tmp)}; rm -f ${q(tmp)}`)).trim();
-  log(`${file.name}: ${out}`);
-  if (!out.includes("Success")) throw new Error(out.split("\n").pop() || "install failed");
-  appsLoaded = false;
-}
-
 // ---------- storage tab: overview, apps by size, files by size ----------
 const fmtBytes = (n) => {
   if (!(n >= 0)) return "?";
@@ -1477,7 +1485,7 @@ const SHOW_FILES = 500;   // the list shows the largest 500 that match; search n
 let storageView = "apps", fileCat = 0, STORAGE = null, FILES = null, storageSel = new Set();
 
 async function renderStorage() {
-  if (!appsLoaded) await loadApps();
+  await loadApps({ keepSide: true });
   STORAGE = parseDiskstats(await sh("dumpsys diskstats"));
   renderStorageSummary();
   if (storageView === "files" && !FOLDERS) await loadFolders();
@@ -1819,15 +1827,16 @@ const CLEAN = [
   ["Delete", null], ["Contacts", "content"], ["Calendar", "content"], ["Call log", "content"], ["SMS", "content"],
   ["Files", "storage"], ["Apps & app data", "storage"],
   ["Reset", null], ["Saved Wi-Fi networks", "wifi"], ["Settings", "settings"], ["Keyboard learned words", "keyboard"], ["Screen lock & fingerprints", "lock"],
-  ["Tools", null], ["Close apps & free RAM", "ram"], ["Flush free space", "trim"], ["Install an app", "install"], ["App names & icons", "names"],
+  ["Tools", null], ["Close apps & free RAM", "ram"], ["Flush free space", "trim"], ["Install apps", "installtab"], ["App names & icons", "names"],
 ];
 let cleanChoice = "Contacts", settingsCat = "Wi-Fi";
 function renderCleanup() {
   $("#cleanNav").replaceChildren(...CLEAN.map(([title, kind]) => {
     if (!kind) return el("div", "group", title);
     const b = el("button"); b.setAttribute("aria-pressed", title === cleanChoice);
-    b.append(el("span", "", title), ...(kind === "storage" ? [el("span", "muted small", "Storage tab")] : []));
+    b.append(el("span", "", title), ...(kind === "storage" ? [el("span", "muted small", "Storage tab")] : kind === "installtab" ? [el("span", "muted small", "Install tab")] : []));
     b.onclick = () => {
+      if (kind === "installtab") { showTab("install"); return; }
       if (kind === "storage") { storageView = title === "Files" ? "files" : "apps"; showTab("storage"); if (storageView === "files") $("#storageView [data-v=files]").click(); return; }
       cleanChoice = title; renderCleanup();
     };
@@ -1950,12 +1959,6 @@ function toolCard(kind) {
   } else if (kind === "trim") {
     head("Flush free space", "Sends TRIM so the storage chip erases blocks freed by deleted files. Existing files are not touched.");
     card.append(button("Flush free space", "primary", (b) => ACTIONS.trim(b)));
-  } else if (kind === "install") {
-    head("Install an app", "Install an .apk file from this computer. Updates the app if it is already installed and keeps its data. Split bundles (.apks, .xapk) need the script.");
-    const file = el("input"); file.type = "file"; file.accept = ".apk"; file.id = "apkFile";
-    const row = el("div", "row"); row.style.marginTop = "12px";
-    row.append(button("Install", "primary", (b) => runButton(b, installApk, res)));
-    card.append(file, row);
   } else if (kind === "names") {
     head("App names & icons", "Names and icons are read from each app once and remembered in this browser. Read them again after a language change.");
     card.append(button("Read names again", "primary", (b) => runButton(b, async () => { await cache.clear(); APPS.forEach((a) => { a.icon = ""; a.name = nameOf(a.p); }); appsLoaded = false; await loadApps(); log("Names and icons are being read again (see the Apps tab)."); }, res)));
@@ -1982,10 +1985,178 @@ async function removeLock(btn, res) {
   }, res);
 }
 
+// ---------- install tab: .apk files and split bundles (.apks, .xapk, .apkm) from this computer ----------
+// Minimal ZIP reader (APKs and bundles are ZIP files): reads the central directory, inflates single entries on demand.
+async function openZip(blob) {
+  const tailLen = Math.min(blob.size, 65557);
+  const tail = new Uint8Array(await blob.slice(blob.size - tailLen).arrayBuffer());
+  let e = -1;
+  for (let i = tail.length - 22; i >= 0; i--) if (tail[i] === 0x50 && tail[i + 1] === 0x4b && tail[i + 2] === 5 && tail[i + 3] === 6) { e = i; break; }
+  if (e < 0) throw new Error("not a ZIP/APK file");
+  const t = new DataView(tail.buffer);
+  let count = t.getUint16(e + 10, true), cdSize = t.getUint32(e + 12, true), cdOff = t.getUint32(e + 16, true);
+  if (cdOff === 0xffffffff && e >= 20) {   // ZIP64 (big bundles with OBB files)
+    const z = new DataView(await blob.slice(Number(t.getBigUint64(e - 20 + 8, true)), Number(t.getBigUint64(e - 20 + 8, true)) + 56).arrayBuffer());
+    count = Number(z.getBigUint64(32, true)); cdSize = Number(z.getBigUint64(40, true)); cdOff = Number(z.getBigUint64(48, true));
+  }
+  const cd = new DataView(await blob.slice(cdOff, cdOff + cdSize).arrayBuffer());
+  const entries = [], dec = new TextDecoder();
+  for (let i = 0, p = 0; i < count && p + 46 <= cd.byteLength; i++) {
+    const nameLen = cd.getUint16(p + 28, true), extraLen = cd.getUint16(p + 30, true), commentLen = cd.getUint16(p + 32, true);
+    let compSize = cd.getUint32(p + 20, true), size = cd.getUint32(p + 24, true), offset = cd.getUint32(p + 42, true);
+    const name = dec.decode(new Uint8Array(cd.buffer, p + 46, nameLen));
+    // ZIP64 extra field: the 0xffffffff values follow in this order
+    for (let x = p + 46 + nameLen; x + 4 <= p + 46 + nameLen + extraLen;) {
+      const id = cd.getUint16(x, true), len = cd.getUint16(x + 2, true);
+      if (id === 1) {
+        let y = x + 4;
+        if (size === 0xffffffff) { size = Number(cd.getBigUint64(y, true)); y += 8; }
+        if (compSize === 0xffffffff) { compSize = Number(cd.getBigUint64(y, true)); y += 8; }
+        if (offset === 0xffffffff) offset = Number(cd.getBigUint64(y, true));
+      }
+      x += 4 + len;
+    }
+    entries.push({ name, method: cd.getUint16(p + 10, true), compSize, size, offset });
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  const data = async (en) => {
+    const h = new DataView(await blob.slice(en.offset, en.offset + 30).arrayBuffer());
+    const start = en.offset + 30 + h.getUint16(26, true) + h.getUint16(28, true);
+    const raw = blob.slice(start, start + en.compSize);
+    if (en.method === 0) return raw;
+    if (en.method !== 8) throw new Error(`${en.name}: unsupported compression (the file may be encrypted)`);
+    return new Response(raw.stream().pipeThrough(new DecompressionStream("deflate-raw"))).blob();
+  };
+  const blobOf = async (name) => { const en = entries.find((x) => x.name === name); return en ? data(en) : null; };
+  // bytes() of a missing entry is empty, like "unzip -p" on the phone
+  return { entries, blob: blobOf, bytes: async (name) => { const b = await blobOf(name); return b ? new Uint8Array(await b.arrayBuffer()) : new Uint8Array(); } };
+}
+
+// Name, package, version and icon of one APK (a Blob).
+async function apkInfo(apk, lang) {
+  const zip = await openZip(apk);
+  const manifest = await zip.bytes("AndroidManifest.xml");
+  if (!manifest.length) throw new Error("no AndroidManifest.xml: not an app");
+  const arsc = await zip.bytes("resources.arsc");
+  const m = xmlAttrs(manifest, "manifest", { package: 0, versionName: 0x0101021c });
+  let label = "", icon = "";
+  try { label = appLabel(manifest, arsc.length ? arsc : null, lang); } catch {}
+  try { icon = await makeIcon((f) => zip.bytes(f), manifest, arsc); } catch {}
+  return { pkg: m.package?.value || "", version: m.versionName?.type === 3 ? m.versionName.value : "", label, icon };
+}
+
+// One dropped file -> {parts: [{name, blob}], obbs: [{name, blob}], info}. Bundles keep every .apk inside.
+// shortcut: all splits of a bundle are installed (Android picks the matching ones); bundletool's "standalones/" are skipped.
+async function readInstallFile(file, lang) {
+  if (/\.apk$/i.test(file.name)) return { parts: [{ name: "base.apk", blob: file }], obbs: [], info: await apkInfo(file, lang) };
+  const zip = await openZip(file);
+  const apks = zip.entries.filter((e) => /\.apk$/i.test(e.name) && !e.name.startsWith("standalones/"));
+  if (!apks.length) throw new Error("no .apk inside this bundle");
+  const base = apks.find((e) => /(^|\/)base(-master)?\.apk$/i.test(e.name)) || apks[0];
+  const parts = [];
+  for (const e of [base, ...apks.filter((x) => x !== base)]) parts.push({ name: e.name.split("/").pop(), blob: await zip.blob(e.name) });
+  const obbs = [];
+  for (const e of zip.entries.filter((x) => /^Android\/obb\/.+\.obb$/i.test(x.name))) obbs.push({ name: e.name, blob: await zip.blob(e.name) });
+  return { parts, obbs, info: await apkInfo(parts[0].blob, lang) };
+}
+
+let INSTALL = [], installLang = null;
+async function addInstallFiles(files) {
+  installLang ??= languageBytes(((await queue(() => sh("getprop persist.sys.locale"))).trim() || "en").slice(0, 2));
+  for (const file of files) {
+    const item = { file, status: "Reading...", size: file.size };
+    INSTALL.push(item); renderInstall();
+    try {
+      Object.assign(item, await readInstallFile(file, installLang));
+      const out = await queue(() => sh(`dumpsys package ${q(item.info.pkg)} | grep -m1 versionName`));
+      item.installed = (out.match(/versionName=(.*)/) || [])[1]?.trim() || "";
+      item.status = item.installed ? (item.installed === item.info.version ? "Same version installed (reinstall)" : `Update from ${item.installed}`) : "Ready";
+      item.ready = true;
+    } catch (e) { item.status = "Cannot install: " + e.message; item.ready = false; }
+    renderInstall();
+  }
+}
+function renderInstall() {
+  const list = $("#installList");
+  if (!INSTALL.length) { list.replaceChildren(el("div", "empty", "No files yet.")); }
+  else list.replaceChildren(...INSTALL.map((it) => {
+    const row = el("div", "app"), info = el("div", "info");
+    const a = { p: it.info?.pkg || it.file.name, name: it.info?.label || it.file.name, icon: it.info?.icon || "" };
+    const kind = it.parts?.length > 1 ? `Bundle, ${it.parts.length} parts` + (it.obbs?.length ? ` + ${it.obbs.length} OBB` : "") : "APK";
+    info.append(el("div", "name", a.name), el("div", "pkg", [it.info?.pkg, it.info?.version && "v" + it.info.version, fmtBytes(it.size), kind].filter(Boolean).join(" · ")));
+    const st = el("span", "badge " + (it.done ? "green" : it.ready === false || it.failed ? "amber" : "blue"), it.status);
+    const rm = el("button", "gear", "✕"); rm.title = "Remove from the list"; rm.setAttribute("aria-label", rm.title);
+    rm.onclick = () => { INSTALL = INSTALL.filter((x) => x !== it); renderInstall(); };
+    row.style.cursor = "default";
+    row.append(iconEl(a), info, st, rm);
+    return row;
+  }));
+  const todo = INSTALL.filter((x) => x.ready && !x.done);
+  $("#installInfo").textContent = todo.length ? `${todo.length} to install` : INSTALL.length ? "Nothing left to install" : "Add files to install";
+  const go = $("#installGo");
+  if (!go.dataset.running && !go.classList.contains("done") && !go.classList.contains("warn")) go.disabled = !todo.length;
+}
+
+// Copy a Blob to the phone, reporting progress (0-100).
+async function pushBlob(blob, path, progress) {
+  let sent = 0;
+  const counted = blob.stream().pipeThrough(new TransformStream({ transform(c, ctl) { sent += c.length; progress(Math.round(sent * 100 / (blob.size || 1))); ctl.enqueue(c); } }));
+  const sync = await adb.sync();
+  try { await sync.write({ filename: path, file: counted }); } finally { await sync.dispose(); }
+}
+async function installItem(it, set) {
+  const dir = "/data/local/tmp/battery-optimizer-install";
+  await sh(`rm -rf ${dir}; mkdir -p ${dir}`);
+  try {
+    const paths = [];
+    for (const [i, part] of it.parts.entries()) {
+      const path = `${dir}/${i}.apk`;
+      await pushBlob(part.blob, path, (pc) => set(`Uploading ${it.parts.length > 1 ? `part ${i + 1}/${it.parts.length} ` : ""}${pc}%`));
+      paths.push([path, part.blob.size]);
+    }
+    set("Installing...");
+    let out;
+    if (paths.length === 1) out = await sh(`pm install -r ${paths[0][0]}`);
+    else {
+      // Split APKs: one install session, every part written into it, then committed (what "adb install-multiple" does).
+      const sid = ((await sh(`pm install-create -r -S ${paths.reduce((n, [, s]) => n + s, 0)}`)).match(/\[(\d+)\]/) || [])[1];
+      if (!sid) throw new Error("the phone did not start an install session");
+      for (const [i, [path, size]] of paths.entries()) {
+        const w = await sh(`pm install-write -S ${size} ${sid} part${i} ${path}`);
+        if (!/Success/i.test(w)) { await sh(`pm install-abandon ${sid}`); throw new Error(firstError(w)); }
+      }
+      out = await sh(`pm install-commit ${sid}`);
+    }
+    if (!out.includes("Success")) throw new Error(firstError(out.replace(/^Success.*$/m, "")));
+    for (const obb of it.obbs || []) {   // game data from .xapk files
+      const target = "/sdcard/" + obb.name;
+      await sh(`mkdir -p ${q(target.slice(0, target.lastIndexOf("/")))}`);
+      await pushBlob(obb.blob, target, (pc) => set(`Copying game data ${pc}%`));
+    }
+  } finally { await sh(`rm -rf ${dir}`); }
+}
+async function installAll(btn) {
+  await runButton(btn, async (set) => {
+    const todo = INSTALL.filter((x) => x.ready && !x.done);
+    let failed = 0;
+    for (const [n, it] of todo.entries()) {
+      const name = it.info.label || it.info.pkg;
+      try {
+        await installItem(it, (t) => { set(`${n + 1}/${todo.length}: ${t}`); it.status = t; renderInstall(); });
+        it.done = true; it.status = "Installed ✓"; log(`Installed ${name} ${it.info.version}`);
+      } catch (e) { failed++; it.failed = true; it.status = "Failed: " + e.message; log(`FAILED ${name}: ${e.message}`); }
+      renderInstall();
+    }
+    appsLoaded = false;   // the Apps tab reads the list again
+    if (failed) return `⚠ ${failed} failed`;
+  });
+  renderInstall();
+}
+
 // ---------- tabs and wiring ----------
 let tab = "apps";
 const TAB_LOAD = { apps: () => appsLoaded || loadApps(), battery: refreshStatus, settings: renderSettings,
-  permissions: renderPermissions, radios: renderRadios, storage: renderStorage, cleanup: () => { renderCleanup(); } };
+  permissions: renderPermissions, radios: renderRadios, storage: renderStorage, install: async () => renderInstall(), cleanup: () => { renderCleanup(); } };
 function showTab(name) {
   tab = name;
   document.querySelectorAll("[data-tab]").forEach((t) => t.setAttribute("aria-selected", t.dataset.tab === name));
@@ -2006,6 +2177,13 @@ function renderChips() {
 }
 renderChips();
 $("#search").oninput = renderApps;
+const drop = $("#drop");
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); addInstallFiles([...e.dataTransfer.files]).catch(showError); };
+$("#installFiles").onchange = (e) => { addInstallFiles([...e.target.files]).catch(showError); e.target.value = ""; };
+$("#installClear").onclick = () => { INSTALL = []; renderInstall(); };
+$("#installGo").onclick = () => installAll($("#installGo"));
 $("#showAllSystem").checked = showAllSystem;
 $("#showAllSystem").onchange = (e) => { showAllSystem = e.target.checked; saveJson("phone-show-all-system", showAllSystem); renderApps(); };
 $("#storageSearch").oninput = () => STORAGE && renderStorageList();

@@ -87,6 +87,10 @@ phonehelp() {
                Close apps & free RAM closes apps and background services
                and keeps the ones you would notice losing.
                Notifications turns them off or on per app, or for all apps.
+  store        Search F-Droid (open-source apps) on this computer and install
+               the chosen apps. Picks the version that fits the phone,
+               checks the download against F-Droid's checksum, installs it
+               with adb. The Play Store app on the phone is not used.
   install FILE.apk
                Install an APK straight onto the phone over USB. Updates the
                app if it is already installed and keeps its data.
@@ -526,6 +530,7 @@ cat > "$py" <<'PY'
 #!/usr/bin/env python3
 """cleanup: choose what to permanently delete from the USB-connected phone."""
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -537,6 +542,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -2390,7 +2397,105 @@ def self_check():
     assert parse_uid_list("nothing") == set()
     assert radio_on("1\n") and radio_on("true") and radio_on("  mState=on") and not radio_on("0") and not radio_on("mState=off")
     assert len({(ns, key) for ns, key, *_ in BATTERY_SETTINGS}) == len(BATTERY_SETTINGS)
+    versions = [{"versionCode": "30", "minSdkVersion": "34"}, {"versionCode": "20", "nativecode": ["x86"]},
+                {"versionCode": "10", "nativecode": ["arm64-v8a"]}, {"versionCode": "40"}]
+    assert pick_version(versions, 33, ["arm64-v8a"], suggested=30)["versionCode"] == "10"
+    assert pick_version(versions, 34, ["arm64-v8a"], suggested=30)["versionCode"] == "30"
+    assert pick_version(versions, 33, ["arm64-v8a"])["versionCode"] == "40"
+    assert pick_version([{"versionCode": "5", "minSdkVersion": "40"}], 33, ["arm64-v8a"]) is None
     print("self-check ok")
+
+
+# --- F-Droid store: open-source apps, downloaded on this computer and installed with adb ---
+
+FDROID = "https://f-droid.org/repo/"
+FDROID_INDEX = os.path.expanduser("~/.cache/phone-fdroid-index-v1.jar")
+
+
+def download(url, path, label):
+    """Download to path with a progress line. A .part file keeps a broken download from replacing a good one."""
+    with urllib.request.urlopen(url, timeout=60) as r, open(path + ".part", "wb") as f:
+        total, done = int(r.headers.get("Content-Length") or 0), 0
+        while chunk := r.read(1 << 16):
+            f.write(chunk)
+            done += len(chunk)
+            if total:
+                print(f"\r{label} {done * 100 // total}%   ", end="", flush=True)
+    print()
+    os.replace(path + ".part", path)
+
+
+def fdroid_index():
+    """F-Droid's app list, downloaded at most once a day."""
+    # shortcut: the index comes over HTTPS but its jar signature is not checked; each APK is checked against its sha256.
+    if not os.path.exists(FDROID_INDEX) or time.time() - os.path.getmtime(FDROID_INDEX) > 86400:
+        os.makedirs(os.path.dirname(FDROID_INDEX), exist_ok=True)
+        try:
+            download(FDROID + "index-v1.jar", FDROID_INDEX, "Downloading the F-Droid app list")
+        except OSError as e:
+            if not os.path.exists(FDROID_INDEX):
+                raise PhoneError(f"could not download the F-Droid app list: {e}")
+            print(f"Could not update the F-Droid app list ({e}), using the saved one.")
+    with zipfile.ZipFile(FDROID_INDEX) as z:
+        return json.loads(z.read("index-v1.json"))
+
+
+def pick_version(versions, sdk, abis, suggested=None):
+    """Newest version that runs on this phone (Android version and processor), preferring stable over beta."""
+    fits = [v for v in versions if int(v.get("minSdkVersion", 1)) <= sdk <= int(v.get("maxSdkVersion", 10 ** 6))
+            and (not v.get("nativecode") or set(v["nativecode"]) & set(abis))]
+    fits.sort(key=lambda v: -int(v["versionCode"]))
+    stable = [v for v in fits if suggested is None or int(v["versionCode"]) <= suggested]
+    return (stable or fits or [None])[0]
+
+
+def install_from_fdroid(name, version):
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "app.apk")
+        try:
+            download(FDROID + version["apkName"], path, f"  Downloading {name} {version.get('versionName', '')}")
+        except OSError as e:
+            print(f"  FAILED: {name}: download failed: {e}")
+            return
+        with open(path, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        if version.get("hashType", "sha256") != "sha256" or digest != version.get("hash"):
+            print(f"  FAILED: {name}: the download does not match F-Droid's checksum, not installed.")
+            return
+        r = subprocess.run(["adb", "install", "-r", path], capture_output=True, text=True, errors="replace")
+        out = (r.stdout + r.stderr).strip()
+        print(f"  installed: {name}" if "Success" in out else f"  FAILED: {name}: {out.splitlines()[-1] if out else 'no answer'}")
+
+
+def store_menu():
+    try:
+        index = fdroid_index()
+    except (PhoneError, OSError, ValueError, zipfile.BadZipFile) as e:
+        print(f"Store not available: {e}")
+        return
+    sdk = int(adb("getprop ro.build.version.sdk")[1].strip() or 0)
+    abis = adb("getprop ro.product.cpu.abilist")[1].strip().split(",")
+    apps = []
+    for a in index.get("apps", []):
+        loc = a.get("localized", {}).get("en-US", {})
+        suggested = a.get("suggestedVersionCode")
+        apps.append((a.get("name") or loc.get("name") or a["packageName"], a.get("summary") or loc.get("summary") or "",
+                     a["packageName"], int(suggested) if suggested else None))
+    apps.sort(key=lambda x: x[0].casefold())
+    while True:
+        installed = package_names(adb("pm list packages")[1])
+        rows = [f"{'[installed] ' if p in installed else ''}{n}  -  {s} ({p})" for n, s, p, _ in apps]
+        chosen = pick("F-Droid", rows, "Type to search | Enter = install or update | Tab = select several | Esc = back", multi=True)
+        if not chosen:
+            return
+        for i in chosen:
+            name, _, pkg, suggested = apps[i]
+            version = pick_version(index.get("packages", {}).get(pkg, []), sdk, abis, suggested)
+            if version:
+                install_from_fdroid(name, version)
+            else:
+                print(f"  {name}: no version of this app runs on this phone.")
+        ask("Press Enter to go back to the list.")
 
 
 # Entry point of the Python part: check tools and phone, then open the requested menu.
@@ -2406,6 +2511,8 @@ def main():
             battery_menu()
         elif sys.argv[1:] == ["--permissions"]:
             permissions_menu()
+        elif sys.argv[1:] == ["--store"]:
+            store_menu()
         else:
             main_menu()
     except KeyboardInterrupt:
@@ -2432,6 +2539,7 @@ case "$1" in
             "Autostart      choose which apps may start when the phone boots" \
             "Permissions    see and change which apps have which permission" \
             "Cleanup        delete files and data, disable apps, notifications" \
+            "Store          install open-source apps from F-Droid" \
             "Help           what every tool does" \
             | fzf --height=40% --reverse --prompt="phone > " --header="Enter = open | Esc = quit"); do
             case "$choice" in
@@ -2441,6 +2549,7 @@ case "$1" in
                 Autostart*)   "$self" autostart;;
                 Permissions*) "$self" permissions;;
                 Cleanup*)     "$self" cleanup;;
+                Store*)       "$self" store;;
                 Help*)        phonehelp | less;;
             esac
         done;;
@@ -2448,9 +2557,10 @@ case "$1" in
     battery)     cleanup --battery;;
     permissions) cleanup --permissions;;
     cleanup)     cleanup;;
+    store)       cleanup --store;;
     install)     install_apk "$2";;
     help)        phonehelp;;
     _appops)     shift; appops "$@";;
     selfcheck)   cleanup --self-check;;
-    *)           echo "usage: $0 [battery|optimize|unoptimize|autostart|permissions|cleanup|install FILE.apk|help]" >&2; exit 1;;
+    *)           echo "usage: $0 [battery|optimize|unoptimize|autostart|permissions|cleanup|store|install FILE.apk|help]" >&2; exit 1;;
 esac

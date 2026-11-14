@@ -12,7 +12,9 @@ ADB-based battery optimizer and cleanup tool for Android. Runs from Linux, Windo
 - **Deep sleep**: Doze 30 s after screen off (on phones that allow it over USB; otherwise quick doze via power saving).
 - **Permissions**: by permission or per app, including special access (usage access, install unknown apps, all files access, ...).
 - **Storage**: apps and files by size; uninstall, clear data, clear caches, secure file delete.
-- **Cleanup**: contacts, calendar, call log, SMS, saved Wi-Fi networks, settings reset, keyboard learned words, screen lock removal, free RAM, TRIM, APK install.
+- **Install**: drag in `.apk` files or split bundles (`.apks`, `.xapk`, `.apkm`, with OBB data); shows name, icon and version first, installs over USB.
+- **F-Droid store** (script): search open-source apps on the computer, download the version that fits the phone, verify its checksum, install with adb.
+- **Cleanup**: contacts, calendar, call log, SMS, saved Wi-Fi networks, settings reset, keyboard learned words, screen lock removal, free RAM, TRIM.
 - Destructive actions in the web app ask for the phone's screen lock, checked by the phone.
 
 ## Setup: USB debugging
@@ -55,6 +57,7 @@ chmod +x battery-optimizer-linux.sh
 | `autostart` | Apps that start at boot; block or allow |
 | `permissions` | Permissions by type |
 | `cleanup` | Files, contacts, calendar, call log, SMS, apps, app data, settings, keyboard words, screen lock, disable apps, notifications, free RAM, TRIM |
+| `store` | Search and install apps from F-Droid |
 | `install FILE.apk` | Install an APK (split bundles too) |
 | `help` | Description of every tool |
 | `selfcheck` | Parser self-test, no phone needed |
@@ -76,6 +79,7 @@ Keys: arrows to move, **Enter** to choose, **Tab** to select several, **Esc** to
 | `~/.config/phone-battery-backup.json` | browser storage (per phone) | Old values for RESTORE |
 | `~/.config/phone-cleanup-exceptions.json` | keep list | Apps never closed by hard "free RAM" |
 | `~/.cache/phone-cleanup-*.json` | browser storage | App name / icon cache |
+| `~/.cache/phone-fdroid-index-v1.jar` | | F-Droid app list (refreshed daily) |
 
 On Windows `~` is `C:\Users\<you>`. Clearing the site's data in the browser loses the web app's keep list and RESTORE backup.
 
