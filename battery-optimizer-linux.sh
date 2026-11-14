@@ -1839,7 +1839,8 @@ def stream_to_zip(zf, name, command):
             f.write(chunk)
             size += len(chunk)
             print(f"\r  {name}: {fmt_size(size)}   ", end="", flush=True)
-    proc.wait()
+    if proc.wait() != 0:
+        raise PhoneError(f"copying {name} from the phone failed")
     print()
     return size
 
@@ -1882,7 +1883,7 @@ def backup_menu():
     os.makedirs(BACKUP_DIR, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
     for i in chosen:
-        package, label = apps[i][0], re.sub(r"^\s*\S* ?\S*\s+", "", apps[i][1]).rsplit(" (", 1)[0]
+        package, label = apps[i][0], apps[i][1][10:].rsplit(" (", 1)[0]
         path = os.path.join(BACKUP_DIR, f"{package}-{stamp}.zip")
         print(f"Backing up {label}...")
         try:
@@ -1911,7 +1912,8 @@ def restore_backup(path):
         for f in info["files"]:
             local, remote = zf.extract("files/" + f["path"], tmp), "/sdcard/" + f["path"]
             adb(f"mkdir -p {shlex.quote(os.path.dirname(remote))}")
-            subprocess.run(["adb", "push", local, remote], capture_output=True)
+            if subprocess.run(["adb", "push", local, remote], capture_output=True).returncode != 0:
+                raise PhoneError(f"could not copy {f['path']} back to the phone")
             os.remove(local)   # a temp copy, so big game data does not pile up on this computer
         if info.get("androidBackup", 0) > 1024:
             print("  Confirm the restore on the phone.")
@@ -2596,6 +2598,8 @@ def self_check():
     assert safe_backup_path("Android/obb/com.a/main.obb", "com.a") and safe_backup_path("Android/data/com.a/f/x.db", "com.a")
     assert not safe_backup_path("Android/data/com.b/x", "com.a") and not safe_backup_path("Android/data/com.a/../../DCIM/x", "com.a")
     assert not safe_backup_path("DCIM/x.jpg", "com.a") and not safe_backup_path(None, "com.a")
+    assert f"{'':>8}  Game A (com.a)"[10:].rsplit(" (", 1)[0] == "Game A"
+    assert f"{fmt_size(999_000_000):>8}  Game A (com.a)"[10:].rsplit(" (", 1)[0] == "Game A"
     assert fmt_size(999) == "999 B" and fmt_size(1500) == "1.5 KB" and fmt_size(250_000_000) == "250 MB"
     print("self-check ok")
 

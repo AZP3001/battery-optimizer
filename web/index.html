@@ -821,7 +821,7 @@ async function loadNamesAndIcons() {
   const todo = [];
   for (const a of APPS) {
     const apk = apks[a.p];
-    if (!apk) continue;
+    if (!apk || (a.tier === 4 && !showAllSystem && !a.optimized && !a.off)) continue;
     const c = await cache.get(a.p);
     if (c && c.apk === apk) applyMeta(a, c); else todo.push([a, apk]);
   }
@@ -872,16 +872,20 @@ const sortApps = () => APPS.sort((a, b) => a.tier - b.tier || a.name.localeCompa
 // keepSide: leave the selection panel as it is (so its Apply button can show "Done").
 async function loadApps({ keepSide = false } = {}) {
   const old = Object.fromEntries(APPS.map((a) => [a.p, a]));
-  const all = [...packageNames(await sh("pm list packages"))];
-  const user = await userPackages(all);
-  const off = packageNames(await sh("pm list packages -d"));
-  const ignored = {};
-  for (const op of OPTIMIZE_OPS)
-    ignored[op] = new Set((await sh(`cmd appops query-op ${op} ignore`)).split("\n").map((l) => l.trim()).filter(validPkg));
-  const bootOut = await sh("for a in BOOT_COMPLETED LOCKED_BOOT_COMPLETED; do cmd package query-receivers --brief -a android.intent.action.$a --include-stopped-packages; done");
-  const boot = new Set(bootOut.split("\n").map((l) => l.replace(/\s/g, "")).filter((l) => l.includes("/")).map((l) => l.split("/")[0]));
-  const uids = await packageUids();
-  const blocked = await uidList("blacklist");
+  // Every list in one shell call (each call over USB costs a round trip), split on a marker line.
+  const out = (await sh(["pm list packages", "pm list packages -3", "pm list packages -s", "pm list packages -d",
+    ...OPTIMIZE_OPS.map((op) => `cmd appops query-op ${op} ignore`),
+    "for a in BOOT_COMPLETED LOCKED_BOOT_COMPLETED; do cmd package query-receivers --brief -a android.intent.action.$a --include-stopped-packages; done",
+    "pm list packages -U", "cmd netpolicy list restrict-background-blacklist"].join("; echo @@SECTION@@; "))).split("@@SECTION@@\n");
+  if (out.length !== 10) throw new Error("could not read the app list");
+  const [allOut, userOut, sysOut, offOut, ...rest] = out;
+  const all = [...packageNames(allOut)], sys = packageNames(sysOut), off = packageNames(offOut);
+  // installed by the user: "-3", plus every package that is not a system package (some phones leave apps out of "-3")
+  const user = new Set([...packageNames(userOut), ...all.filter((p) => !sys.has(p))]);
+  const ignored = Object.fromEntries(OPTIMIZE_OPS.map((op, i) => [op, new Set(rest[i].split("\n").map((l) => l.trim()).filter(validPkg))]));
+  const boot = new Set(rest[3].split("\n").map((l) => l.replace(/\s/g, "")).filter((l) => l.includes("/")).map((l) => l.split("/")[0]));
+  const uids = Object.fromEntries([...rest[4].matchAll(/^package:(\S+) uid:(\d+)/gm)].map((m) => [m[1], m[2]]));
+  const blocked = parseUidList(rest[5]);
   APPS = all.map((p) => ({
     p, tier: tierOf(p, user), name: old[p]?.name || nameOf(p), icon: old[p]?.icon || "", uid: uids[p], boot: boot.has(p),
     optimized: OPTIMIZE_OPS.every((op) => ignored[op].has(p)), bgOff: ignored.RUN_ANY_IN_BACKGROUND.has(p),
@@ -2114,7 +2118,7 @@ async function readInstallFile(file, lang) {
   const parts = [];
   for (const e of [base, ...apks.filter((x) => x !== base)]) parts.push({ name: e.name.split("/").pop(), blob: await zip.blob(e.name) });
   const obbs = [];
-  for (const e of zip.entries.filter((x) => /^Android\/obb\/.+\.obb$/i.test(x.name))) obbs.push({ name: e.name, blob: await zip.blob(e.name) });
+  for (const e of zip.entries.filter((x) => /^Android\/obb\/.+\.obb$/i.test(x.name) && !x.name.split("/").includes(".."))) obbs.push({ name: e.name, blob: await zip.blob(e.name) });
   return { parts, obbs, info: await apkInfo(parts[0].blob, lang) };
 }
 
@@ -2270,6 +2274,7 @@ async function backupApps(btn, rows) {
   let dir;
   try { dir = await window.showDirectoryPicker({ mode: "readwrite", id: "battery-optimizer-backups" }); } catch { return; }
   await runButton(btn, async (set) => {
+    let failed = 0;
     const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
     for (const [n, x] of rows.entries()) {
       const p = x.p, tag = rows.length > 1 ? `${n + 1}/${rows.length} ` : "";
@@ -2279,7 +2284,9 @@ async function backupApps(btn, rows) {
       const files = parseSizes(await sh(`find ${q("/sdcard/Android/data/" + p)} ${q("/sdcard/Android/obb/" + p)} -type f -exec stat -c '%s %n' {} + 2>/dev/null`));
       const version = ((await sh(`dumpsys package ${q(p)} | grep -m1 versionName`)).match(/versionName=(.*)/) || [])[1]?.trim() || "";
       const handle = await dir.getFileHandle(`${p}-${stamp}.zip`, { create: true });
-      const zip = zipWriter((await handle.createWritable()).getWriter());
+      const writer = (await handle.createWritable()).getWriter();
+      const zip = zipWriter(writer);
+      try {
       const total = files.reduce((s, f) => s + f.size, 0);
       let done = 0;
       const info = { format: 1, package: p, name: x.a.name, version, phone: $("#phoneName").textContent, created: new Date().toISOString(), apks: [], files: [], androidBackup: 0 };
@@ -2303,7 +2310,13 @@ async function backupApps(btn, rows) {
       await zip.close();
       log(`Backed up ${x.a.name}: ${info.apks.length} app part(s), ${info.files.length} data files (${fmtBytes(total)})` +
         (bu.checked ? `, Android backup ${fmtBytes(info.androidBackup)}${info.androidBackup < 1024 ? " (empty: the app does not allow it)" : ""}` : ""));
+      } catch (e) {
+        // the file is only written when closed, so aborting leaves nothing half-done behind
+        await writer.abort().catch(() => {});
+        failed++; log(`FAILED ${x.a.name}: ${e.message}`);
+      }
     }
+    if (failed) return `⚠ ${failed} failed`;
   });
 }
 
@@ -2355,10 +2368,12 @@ async function restoreBackups(btn, files) {
 const FDROID_REPO = "https://f-droid.org/repo";
 let STORE = null, storeDevice = null;
 async function loadStore() {
-  if (STORE) return;
-  const r = await fetch("fdroid.json", { cache: "no-cache" });
-  if (!r.ok) throw new Error("the F-Droid list is not available right now");
-  STORE = await r.json();
+  if (STORE && storeDevice) return;
+  if (!STORE) {
+    const r = await fetch("fdroid.json", { cache: "no-cache" });
+    if (!r.ok) throw new Error("the F-Droid list is not available right now");
+    STORE = await r.json();
+  }
   const [sdk, abis] = (await sh("getprop ro.build.version.sdk; getprop ro.product.cpu.abilist")).trim().split("\n");
   storeDevice = { sdk: parseInt(sdk, 10) || 0, abis: (abis || "").split(",").filter(Boolean) };
 }
@@ -2473,7 +2488,10 @@ $("#installClear").onclick = () => { INSTALL = []; renderInstall(); };
 $("#installGo").onclick = () => installAll($("#installGo"));
 $("#storeSearch").oninput = () => STORE && renderStore();
 $("#showAllSystem").checked = showAllSystem;
-$("#showAllSystem").onchange = (e) => { showAllSystem = e.target.checked; saveJson("phone-show-all-system", showAllSystem); renderApps(); };
+$("#showAllSystem").onchange = (e) => {
+  showAllSystem = e.target.checked; saveJson("phone-show-all-system", showAllSystem); renderApps();
+  if (showAllSystem && adb && appsLoaded) loadNamesAndIcons().catch(showError);   // names and icons of the parts now shown
+};
 $("#storageSearch").oninput = () => STORAGE && renderStorageList();
 $("#storageView").querySelectorAll("button").forEach((b) => (b.onclick = () => {
   storageView = b.dataset.v; storageSel.clear();
@@ -2530,6 +2548,7 @@ async function connect() {
   }
   adb = new Adb(transport);
   serial = device.serial;
+  storeDevice = null;   // another phone may need other app versions
   transport.disconnected.then(() => { if (adb) { adb = null; appsLoaded = false; gateOpen = null; namesRun++; setConnected(""); toast("Phone disconnected."); } });
   // "A065 | Nothing Phone (2)": model number, then the name the phone uses for itself.
   const model = (await sh("getprop ro.product.model")).trim();
