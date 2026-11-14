@@ -337,7 +337,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.5</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.6</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -410,6 +410,11 @@ const BATTERY_SETTINGS = [
   ["secure", "adaptive_sleep", "0", false, "Screen attention (camera watches your face): off"],
   ["system", "peak_refresh_rate", "60.0", false, "Refresh rate: 60 Hz"],
   ["system", "screen_brightness_mode", "1", false, "Adaptive brightness: on"],
+  ["secure", "adaptive_connectivity_enabled", "1", false, "Adaptive connectivity (4G when 5G is not needed): on"],
+  ["secure", "adaptive_charging_enabled", "1", true, "Adaptive charging (longer battery lifespan): on"],
+  ["secure", "send_action_app_error", "0", false, "Send app error reports: off"],
+  ["system", "samsung_errorlog_agree", "0", true, "Samsung diagnostic data: off"],
+  ["global", "wifi_verbose_logging_enabled", "0", false, "Wi-Fi verbose logging: off"],
   ["global", "battery_saver_constants", SAVER_CONSTANTS, false, "Stronger power saving mode"],
   ["global", "window_animation_scale", "0.5", false, "Window animations 0.5x"],
   ["global", "transition_animation_scale", "0.5", false, "Transition animations 0.5x"],
@@ -490,6 +495,28 @@ function nameOf(p) {
 const rowText = (p) => `${nameOf(p)} (${p})`;
 
 // ---------- battery tool (port of the script's battery section) ----------
+// --- extra savers: stronger, optional, never applied by MAX BATTERY. RESTORE undoes them. ---
+// Apps that only collect diagnostics or usage data. Disabled, not removed.
+const TELEMETRY_APPS = ["com.samsung.android.dqagent", "com.sec.android.diagmonagent", "com.samsung.android.rubin.app",
+  "com.nothing.logkit", "com.google.android.feedback", "com.miui.analytics", "com.miui.msa.global"];
+// {SIM slot: allowed network types as a binary string}, from Android's own phone command.
+async function netTypes() {
+  const out = await sh('for s in 0 1; do echo "#$s=$(cmd phone get-allowed-network-types-for-users -s $s 2>/dev/null)"; done');
+  return Object.fromEntries(Object.entries(parseMarked(out)).filter(([, m]) => /^[01]+$/.test(m)));
+}
+// 5G (NR) is network type 20, so bit 20 from the right.
+const has5g = (m) => m.length >= 20 && m[m.length - 20] === "1";
+const set5g = (m, on) => { m = m.padStart(20, "0"); return m.slice(0, m.length - 20) + (on ? "1" : "0") + m.slice(m.length - 19); };
+// {w, h, d, over} from "wm size; wm density" (over = width in use when a lower resolution is set).
+function parseDisplay(text) {
+  const size = text.match(/Physical size: (\d+)x(\d+)/), dens = text.match(/Physical density: (\d+)/), over = text.match(/Override size: (\d+)x/);
+  return size && dens ? { w: Number(size[1]), h: Number(size[2]), d: Number(dens[1]), over: over ? Number(over[1]) : null } : null;
+}
+// Smaller resolution with the same proportions; density shrinks too so everything keeps its size.
+const scaledDisplay = ({ w, h, d }, f) => [Math.round(w * f / 2) * 2, Math.round(h * f / 2) * 2, Math.round(d * f)];
+// Preinstalled apps most people never asked for (only apps you did not install yourself count).
+const BLOAT = /^com\.(netflix|facebook|linkedin|spotify|zhiliaoapp|ss\.android\.ugc|booking|amazon\.|king\.|microsoft\.(skydrive|appmanager|office)|hiya|opera|snapchat|dti\.|aura\.|ironsource|digitalturbine|samsung\.android\.(game\.gamehome|bixby|arzone|aremoji|stickercenter|kidsinstaller|app\.spage|tvplus)|sec\.android\.app\.(samsungapps|kidshome)|nothing\.(experience|userguide)|google\.android\.(apps\.(youtube\.music|tachyon|subscriptions\.red|magazines|podcasts)|videos))/;
+
 // Android refuses to switch power saving while the phone charges, and over USB it always charges.
 // So the charger is hidden from Android for a moment ("unplug" is only pretend, "reset" undoes it).
 const powerSaverCmd = (on) => `cmd battery unplug; cmd power set-mode ${on ? 1 : 0}; cmd battery reset`;
@@ -672,6 +699,10 @@ async function restoreAll() {
   cmds.push(...(backup.data_allowed || []).map((u) => `cmd netpolicy remove restrict-background-whitelist ${u}`));
   cmds.push(...(backup.data_blocked || []).map((u) => `cmd netpolicy remove restrict-background-blacklist ${u}`));
   if (backup.data_saver === false) cmds.push("cmd netpolicy set restrict-background false");
+  for (const [slot, m] of Object.entries(backup.net_types || {}))
+    if (/^\d$/.test(slot) && /^[01]+$/.test(m)) cmds.push(`cmd phone set-allowed-network-types-for-users -s ${slot} ${m}`);
+  cmds.push(...(backup.telemetry_disabled || []).filter(validPkg).map((p) => `pm enable --user 0 ${q(p)}`));
+  if (backup.resolution) cmds.push("wm size reset; wm density reset");
   await runAll(cmds);
   await inBatches(backup.restricted || [], (p) => [...RESTRICT_OPS.map((op) => `cmd appops set ${p} ${op} default`), `am set-standby-bucket ${p} active`].join("; "));
   await inBatches(backup.whitelist_removed || [], (p) => `dumpsys deviceidle whitelist +${p} >/dev/null 2>&1`);
@@ -891,7 +922,7 @@ async function loadNamesAndIcons() {
 let showAllSystem = loadJson("phone-show-all-system", false);
 let APPS = [], selected = new Set(), filter = "all", appsLoaded = false;
 const FILTERS = [["all", "All"], ["user", "Your apps"], ["extra", "Preinstalled"], ["system", "System (not recommended)"],
-  ["opt", "Optimized"], ["notopt", "Not optimized"], ["keep", "Keep list"], ["boot", "Starts at boot"], ["off", "Disabled"]];
+  ["opt", "Optimized"], ["notopt", "Not optimized"], ["keep", "Keep list"], ["boot", "Starts at boot"], ["off", "Disabled or removed"], ["bloat", "Bloatware"]];
 // Per-app switches. ops = app-ops set to allow / ignore.
 const CONTROLS = [
   { key: "bg", label: "Run in background", help: "Off = sleeps until you open it", ops: ["RUN_ANY_IN_BACKGROUND", "RUN_IN_BACKGROUND"] },
@@ -917,8 +948,8 @@ async function loadApps({ keepSide = false } = {}) {
   const out = (await sh(["pm list packages", "pm list packages -3", "pm list packages -s", "pm list packages -d",
     ...OPTIMIZE_OPS.map((op) => `cmd appops query-op ${op} ignore`),
     "for a in BOOT_COMPLETED LOCKED_BOOT_COMPLETED; do cmd package query-receivers --brief -a android.intent.action.$a --include-stopped-packages; done",
-    "pm list packages -U", "cmd netpolicy list restrict-background-blacklist"].join("; echo @@SECTION@@; "))).split("@@SECTION@@\n");
-  if (out.length !== 10) throw new Error("could not read the app list");
+    "pm list packages -U", "cmd netpolicy list restrict-background-blacklist", "pm list packages -u"].join("; echo @@SECTION@@; "))).split("@@SECTION@@\n");
+  if (out.length !== 11) throw new Error("could not read the app list");
   const [allOut, userOut, sysOut, offOut, ...rest] = out;
   const all = [...packageNames(allOut)], sys = packageNames(sysOut), off = packageNames(offOut);
   // installed by the user: "-3", plus every package that is not a system package (some phones leave apps out of "-3")
@@ -927,10 +958,13 @@ async function loadApps({ keepSide = false } = {}) {
   const boot = new Set(rest[3].split("\n").map((l) => l.replace(/\s/g, "")).filter((l) => l.includes("/")).map((l) => l.split("/")[0]));
   const uids = Object.fromEntries([...rest[4].matchAll(/^package:(\S+) uid:(\d+)/gm)].map((m) => [m[1], m[2]]));
   const blocked = parseUidList(rest[5]);
-  APPS = all.map((p) => ({
+  // removed for this user but still on the phone: listed so they can be brought back
+  const gone = [...packageNames(rest[6])].filter((p) => !all.includes(p));
+  APPS = [...all, ...gone].map((p) => ({
+    removed: gone.includes(p),
     p, tier: tierOf(p, user), name: old[p]?.name || nameOf(p), icon: old[p]?.icon || "", uid: uids[p], boot: boot.has(p),
     optimized: OPTIMIZE_OPS.every((op) => ignored[op].has(p)), bgOff: ignored.RUN_ANY_IN_BACKGROUND.has(p),
-    dataOff: uids[p] !== undefined && blocked.has(uids[p]), off: off.has(p),
+    dataOff: uids[p] !== undefined && blocked.has(uids[p]), off: off.has(p) || gone.includes(p),
   }));
   sortApps();
   const still = new Set(APPS.map((a) => a.p));
@@ -945,8 +979,9 @@ async function loadApps({ keepSide = false } = {}) {
 function visibleApps() {
   const s = $("#search").value.trim().toLowerCase(), keep = currentKeep();
   const test = { all: () => true, user: (a) => a.tier === 1, extra: (a) => a.tier === 2, system: (a) => a.tier >= 3,
-    opt: (a) => a.optimized, notopt: (a) => !a.optimized, keep: (a) => keep.has(a.p), boot: (a) => a.boot, off: (a) => a.off }[filter];
-  return APPS.filter((a) => (a.tier < 4 || a.optimized || a.off || showAllSystem) && test(a) && (!s || a.name.toLowerCase().includes(s) || a.p.includes(s)));
+    opt: (a) => a.optimized, notopt: (a) => !a.optimized, keep: (a) => keep.has(a.p), boot: (a) => a.boot, off: (a) => a.off,
+    bloat: (a) => a.tier !== 1 && BLOAT.test(a.p) }[filter];
+  return APPS.filter((a) => (a.tier < 4 || a.optimized || a.off || showAllSystem || filter === "bloat") && test(a) && (!s || a.name.toLowerCase().includes(s) || a.p.includes(s)));
 }
 
 function appRow(a, keep) {
@@ -954,7 +989,7 @@ function appRow(a, keep) {
   row.dataset.p = a.p;
   const info = el("div", "info"); info.append(el("div", "name", a.name), el("div", "pkg", a.p));
   const badges = el("div", "badges");
-  if (a.off) badges.append(el("span", "badge amber", "Disabled"));
+  if (a.off) badges.append(el("span", "badge amber", a.removed ? "Removed" : "Disabled"));
   if (keep.has(a.p)) badges.append(el("span", "badge blue", "Keep"));
   if (a.optimized) badges.append(el("span", "badge green", "Optimized"));
   else if (a.bgOff) badges.append(el("span", "badge amber", "Restricted"));
@@ -1020,7 +1055,7 @@ function renderSide() {
   const rows = CONTROLS.map((c) => settingRow(c.label, c.bootOnly ? `${bootCount} of the selected apps start at boot. ${c.help}` : c.help, (segs[c.key] = seg(ABS, ""))));
   const bucket = el("select"); bucket.append(new Option("No change", ""), ...BUCKETS.map(([v, l]) => new Option(l, v)));
   const keepSeg = seg([["", "No change"], ["add", "Add"], ["remove", "Remove"]], "");
-  const appSeg = seg([["", "No change"], ["enable", "Enable"], ["disable", "Disable"]], "");
+  const appSeg = seg([["", "No change"], ["enable", "Enable"], ["disable", "Disable"], ["remove", "Remove"]], "");
   const stop = el("input"); stop.type = "checkbox"; stop.id = "stopAfter";
   const stopLabel = el("label", "small"); stopLabel.htmlFor = "stopAfter"; stopLabel.append(stop, " Close the apps after applying (force stop)");
   stopLabel.style.cssText = "display:flex;gap:8px;align-items:center;margin-top:12px";
@@ -1061,7 +1096,7 @@ function renderSide() {
   side.replaceChildren(head, presets, ...rows,
     settingRow("Standby bucket", "How often Android lets it run", bucket),
     settingRow("Keep list", "Never restricted by MAX BATTERY", keepSeg),
-    settingRow("App", "Disabled apps disappear until enabled again", appSeg), stopLabel, apply, clear);
+    settingRow("App", "Remove uninstalls; preinstalled apps can be brought back with Enable", appSeg), stopLabel, apply, clear);
 }
 
 // Shell commands for one app. want: {bg,boot,wake,data,notif: ""|"allow"|"block", bucket, app: ""|"enable"|"disable", stop}
@@ -1076,7 +1111,9 @@ function commandsFor(a, want) {
   if (want.data && a.uid !== undefined) cmds.push(`cmd netpolicy ${want.data === "block" ? "add" : "remove"} restrict-background-blacklist ${a.uid}`);
   if (want.bucket) cmds.push(`am set-standby-bucket ${p} ${want.bucket}`);
   if (want.app === "disable") cmds.push(`pm disable-user --user 0 ${p}`);
-  if (want.app === "enable") cmds.push(`pm enable --user 0 ${p}`);
+  // "install-existing" brings back a preinstalled app that was removed for this user
+  if (want.app === "enable") cmds.push(`pm enable --user 0 ${p}`, `cmd package install-existing --user 0 ${p} >/dev/null 2>&1`);
+  if (want.app === "remove") cmds.push(a.tier === 1 ? `pm uninstall ${p}` : `pm uninstall --user 0 ${p}`);
   if (want.stop) cmds.push(`am force-stop ${p}`);
   return cmds;
 }
@@ -1088,11 +1125,18 @@ function recordData(apps, block) {
 }
 
 async function applyToApps(pkgs, want, btn) {
-  const apps = APPS.filter((a) => pkgs.includes(a.p));
+  // Parts the phone needs (calls, unlocking, this USB connection) are never removed.
+  const apps = APPS.filter((a) => pkgs.includes(a.p) && !(want.app === "remove" && PROTECTED_APPS.test(a.p)));
   const n = CONTROLS.filter((c) => want[c.key]).length + !!want.bucket + !!want.keep + !!want.app + !!want.stop;
   if (!n) { toast("Nothing to change yet: pick at least one setting or a preset."); return; }
   const system = apps.filter((a) => a.tier >= 3).length;
-  if (system || want.app === "disable") {
+  if (want.app === "remove") {
+    const pre = apps.filter((a) => a.tier !== 1).length;
+    if (!apps.length || !await confirmWithLock(`Remove ${apps.length} apps?`,
+      apps.slice(0, 8).map((a) => "  " + a.name).join("\n") + (apps.length > 8 ? `\n  ...and ${apps.length - 8} more` : "") +
+      `\n\nApps you installed are uninstalled with their data.` + (pre ? ` ${pre} preinstalled ones are removed for you and can be brought back: filter "Disabled or removed", then Enable.` : "") +
+      (system ? `\n\n${system} are system parts: removing those can break phone features.` : ""), "Remove")) return;
+  } else if (system || want.app === "disable") {
     const warn = [system && `${system} of them are system parts. Restricting those can break phone features.`,
       want.app === "disable" && "Disabled apps disappear from the phone until you enable them again here."].filter(Boolean).join("\n\n");
     if (await modal(`Apply to ${apps.length} apps?`, warn, [["Cancel", ""], ["Apply", "ok", "primary"]]) !== "ok") return;
@@ -1166,7 +1210,7 @@ async function appSettings(a) {
 
   rows.push(el("div", "section-title", "App"));
   sw("enabled", "Enabled", "Off = disabled, it disappears until enabled again", !a.off,
-    (v) => [v ? `pm enable --user 0 ${q(a.p)}` : `pm disable-user --user 0 ${q(a.p)}`]);
+    (v) => [v ? `pm enable --user 0 ${q(a.p)}; cmd package install-existing --user 0 ${q(a.p)} >/dev/null 2>&1` : `pm disable-user --user 0 ${q(a.p)}`]);
   const keepNow = currentKeep().has(a.p);
   sw("keep", "Keep list", "Never restricted by MAX BATTERY", keepNow, (v) => { const k = currentKeep(); v ? k.add(a.p) : k.delete(a.p); saveKeep(k); renderKeepInfo(); return []; });
 
@@ -1183,6 +1227,8 @@ async function appSettings(a) {
   actions.append(action("Force stop", "", "", `am force-stop ${q(a.p)}`),
     action("Clear data", "danger", `Erase all data of ${a.name} (sign-ins, settings, files). It stays installed.`, `pm clear ${q(a.p)}`));
   if (a.tier === 1) actions.append(action("Uninstall", "danger", `Remove ${a.name} from the phone.`, `pm uninstall ${q(a.p)}`));
+  else if (!a.removed && !PROTECTED_APPS.test(a.p)) actions.append(action("Remove", "danger",
+    `Remove the preinstalled app ${a.name} for you. It can be brought back: filter "Disabled or removed", then Enable.`, `pm uninstall --user 0 ${q(a.p)}`));
 
   // After Apply the window reads the phone again, because "Start at boot" and "Run in background" share a switch.
   apply.onclick = () => runButton(apply, async (set) => {
@@ -1452,9 +1498,9 @@ async function renderSettings() {
     const b = loadBackup(); if (v && !b.night_mode) { b.night_mode = night || "no"; saveBackup(b); }
     return v ? "cmd uimode night yes" : `cmd uimode night ${q(b.night_mode || "no")}`;
   });
-  for (const [ns, key, value, samsung, what] of BATTERY_SETTINGS) {
-    const name = `${ns}/${key}`, cur = now[name] ?? "null";
-    if (samsung && cur === "null") continue;   // not on this phone
+  const addSetting = ([ns, key, value, samsung, what], cur) => {
+    const name = `${ns}/${key}`;
+    if (samsung && cur === "null") return;   // not on this phone
     const old = backup.settings?.[name];
     add(name, what, `${name} = ${cur.length > 40 ? cur.slice(0, 40) + "..." : cur}`, cur === value, async (v) => {
       const b = loadBackup(); b.settings ??= {};
@@ -1462,9 +1508,59 @@ async function renderSettings() {
       const prev = b.settings[name]; delete b.settings[name]; saveBackup(b);
       return prev === "null" || prev === undefined ? `settings delete ${ns} ${key}` : `settings put ${ns} ${key} ${q(prev)}`;
     }, cur === value && old === undefined);
+  };
+  for (const s of BATTERY_SETTINGS) addSetting(s, now[`${s[0]}/${s[1]}`] ?? "null");
+  const main = switches.length;   // "Switch all on" stops here
+
+  // --- stronger savers: optional, never applied by MAX BATTERY or "Switch all on"
+  rows.push(el("div", "section-title", "Stronger savers (optional, not part of MAX BATTERY)"));
+  const masks = await netTypes();
+  if (Object.keys(masks).length) {
+    add("5g", "5G off", "Uses 4G, which needs less power, most of all with weak signal", !Object.values(masks).some(has5g), async (v) => {
+      const b = loadBackup(); b.net_types ??= {};
+      const cmds = Object.entries(masks).map(([slot, m]) => {
+        let to = set5g(m, false);
+        if (v) b.net_types[slot] ??= m;
+        else { const old = b.net_types[slot]; to = old && has5g(old) ? old : set5g(m, true); delete b.net_types[slot]; }
+        return `cmd phone set-allowed-network-types-for-users -s ${slot} ${to}`;
+      });
+      saveBackup(b);
+      return cmds.join("; ");
+    });
   }
+  if (!appsLoaded) await loadApps({ keepSide: true });
+  const tele = TELEMETRY_APPS.map((p) => APPS.find((a) => a.p === p && !a.removed)).filter(Boolean);
+  if (tele.length) {
+    add("telemetry", `Diagnostics apps off (${tele.length})`, tele.map((a) => a.name).join(", ") + ": they only collect usage data",
+      tele.every((a) => a.off), async (v) => {
+        const b = loadBackup();
+        if (v) b.telemetry_disabled = [...new Set([...(b.telemetry_disabled || []), ...tele.filter((a) => !a.off).map((a) => a.p)])];
+        else delete b.telemetry_disabled;
+        saveBackup(b);
+        appsLoaded = false;   // the app list shows them as disabled next time
+        return tele.map((a) => `pm ${v ? "disable-user" : "enable"} --user 0 ${q(a.p)}`).join("; ");
+      });
+  }
+  const charge = (await sh("settings get global protect_battery")).trim();
+  if (charge === "0" || charge === "1")
+    addSetting(["global", "protect_battery", "1", true, "Limit charging to 85% (Samsung): longer battery lifespan, less runtime per charge"], charge);
+  const disp = parseDisplay(await sh("wm size; wm density"));
+  if (disp) {
+    const sel = el("select"), sizes = [[1, "Native"], [0.75, "75%"], [0.5, "50% (lowest)"]];
+    sel.append(...sizes.map(([f, name]) => new Option(`${name}: ${scaledDisplay(disp, f)[0]}x${scaledDisplay(disp, f)[1]}`, f)));
+    const cur = String(sizes.map(([f]) => f).sort((a, b) => Math.abs((disp.over || disp.w) / disp.w - a) - Math.abs((disp.over || disp.w) / disp.w - b))[0]);
+    sel.value = cur; sel.setAttribute("aria-label", "Screen resolution");
+    const row = settingRow("Screen resolution", "Lower = less work for the graphics chip. Text and icons keep their size.", sel);
+    sel.onchange = () => st.mark("resolution", row, sel.value !== cur, async () => {
+      const b = loadBackup(); b.resolution = true; saveBackup(b);
+      const [w, h, d] = scaledDisplay(disp, Number(sel.value));
+      return sel.value === "1" ? "wm size reset; wm density reset" : `wm size ${w}x${h}; wm density ${d}`;
+    });
+    rows.push(row);
+  }
+  rows.push(el("p", "muted small", "Account sync cannot be switched off over USB: Android has no command for it. Restricted apps already sync far less."));
   box.replaceChildren(...rows);
-  $("#settingsAllOn").onclick = () => switches.forEach((s) => { if (!s.input.checked && !s.input.disabled) s.input.click(); });
+  $("#settingsAllOn").onclick = () => switches.slice(0, main).forEach((s) => { if (!s.input.checked && !s.input.disabled) s.input.click(); });
   $("#settingsApply").onclick = () => runButton($("#settingsApply"), async (set) => {
     const cmds = [];
     for (const f of st.changes.values()) cmds.push(await f());
@@ -1747,18 +1843,18 @@ function renderStorageBar() {
 async function storageAppAction(btn, rows, what) {
   // Uninstall: only apps you installed (preinstalled ones can be disabled in the Apps tab instead).
   // Clear data: never for parts that calls, unlocking or this USB connection need.
-  const ok = rows.filter((x) => what === "uninstall" ? x.a.tier === 1 : !PROTECTED_APPS.test(x.p) && x.a.tier < 4);
+  const ok = rows.filter((x) => (what === "uninstall" && x.a.tier === 1) || (!PROTECTED_APPS.test(x.p) && x.a.tier < 4));
   const skipped = rows.length - ok.length;
-  if (!ok.length) { await modal("Not possible", what === "uninstall" ? "Only apps you installed can be uninstalled here. Preinstalled apps can be disabled in the Apps tab." : "These are system parts the phone needs.", [["OK", "ok", "primary"]]); return; }
+  if (!ok.length) { await modal("Not possible", "These are system parts the phone needs.", [["OK", "ok", "primary"]]); return; }
   const names = ok.slice(0, 8).map((x) => x.a.name).join(", ") + (ok.length > 8 ? ` and ${ok.length - 8} more` : "");
-  const text = (what === "uninstall" ? `Remove ${ok.length} apps from the phone: ${names}.` : `Erase all data of ${ok.length} apps (sign-ins, settings, files): ${names}. They stay installed.`) +
-    (skipped ? `\n\n${skipped} selected ${skipped > 1 ? "are" : "is"} skipped (${what === "uninstall" ? "preinstalled" : "system parts"}).` : "");
+  const text = (what === "uninstall" ? `Remove ${ok.length} apps from the phone: ${names}. Preinstalled ones can be brought back in the Apps tab (filter "Disabled or removed", then Enable).` : `Erase all data of ${ok.length} apps (sign-ins, settings, files): ${names}. They stay installed.`) +
+    (skipped ? `\n\n${skipped} selected ${skipped > 1 ? "are" : "is"} skipped (system parts).` : "");
   if (!await confirmWithLock(what === "uninstall" ? "Uninstall?" : "Clear data?", text, what === "uninstall" ? "Uninstall" : "Clear data")) return;
   await runButton(btn, async (set) => {
     let done = 0, failed = 0;
     for (const x of ok) {
       set(`${what === "uninstall" ? "Uninstalling" : "Clearing"} ${++done}/${ok.length}...`);
-      const out = (await sh(`pm ${what === "uninstall" ? "uninstall" : "clear"} ${q(x.p)}`)).trim();
+      const out = (await sh(`pm ${what === "uninstall" ? (x.a.tier === 1 ? "uninstall" : "uninstall --user 0") : "clear"} ${q(x.p)}`)).trim();
       if (!out.includes("Success")) { failed++; log(`FAILED ${x.p}: ${out}`); }
       else { storageSel.delete(x.p); log(`${what === "uninstall" ? "Uninstalled" : "Cleared"}: ${x.a.name}`); }
     }
@@ -1825,7 +1921,7 @@ async function confirmWithLock(title, text, okLabel) {
     const box = el("div"), pw = lockField(), err = el("p", "small");
     err.style.color = "var(--red)"; err.textContent = error;
     box.append(el("label", "small muted", "Type the phone's PIN, password or pattern to confirm. Leave it empty if the phone has no screen lock."), pw, err);
-    pw.onkeydown = (e) => { if (e.key === "Enter") pw.closest("dialog").querySelector(".actions .primary").click(); };
+    pw.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); pw.closest("dialog").querySelector(".actions .primary").click(); } };
     setTimeout(() => pw.focus(), 50);
     if (await modal(title, text, [["Cancel", ""], [okLabel, "ok", "primary"]], box) !== "ok") return false;
     const code = pw.value; pw.value = "";
@@ -1948,7 +2044,7 @@ function lockGate(name, title, text) {
     lockGate(name);
     queue(TAB_LOAD[name]).catch(showError);
   });
-  pw.onkeydown = (e) => { if (e.key === "Enter") go.click(); };
+  pw.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); go.click(); } };
   $(`#${name}Gate`).replaceChildren(card);
   setTimeout(() => pw.focus(), 50);
   return false;

@@ -47,6 +47,9 @@ phonehelp() {
                Deep sleep: the phone goes into deep sleep about 30 s after
                the screen turns off, instead of after many minutes.
                Radios: Wi-Fi, mobile data, Bluetooth, NFC, location on/off.
+               Extra savers (optional, never applied by MAX BATTERY): 5G off,
+               diagnostics apps off, lower screen resolution, and on Samsung
+               a charge limit of 85% for a longer battery lifespan.
                Battery use: the apps that used the most battery since the
                last full charge, biggest first. Enter restricts them.
                Status: what is applied right now, plus battery temperature,
@@ -248,6 +251,17 @@ tiers() {
 3 com.nothing.OfflineOTAUpgradeApp Nothing Offline Update
 3 com.nothing.smartcenter Nothing Smart Center
 3 com.nothing.thirdparty Nothing Third-Party Service
+2 com.netflix.mediaclient Netflix
+2 com.netflix.partner.activation Netflix Activation
+2 com.facebook.katana Facebook
+2 com.linkedin.android LinkedIn
+2 com.spotify.music Spotify
+2 com.samsung.android.tvplus Samsung TV Plus
+2 com.samsung.android.arzone AR Zone
+2 com.samsung.android.app.spage Samsung Free
+2 com.google.android.apps.subscriptions.red Google One
+2 com.google.android.apps.magazines Google News
+2 com.google.android.apps.podcasts Google Podcasts
 2 com.facebook.appmanager Facebook App Manager
 2 com.facebook.system Facebook App Installer
 2 com.hiya.star Hiya Spam Protection
@@ -2027,6 +2041,11 @@ BATTERY_SETTINGS = [
     ("secure", "adaptive_sleep", "0", False, "Screen attention (camera watches your face): off"),
     ("system", "peak_refresh_rate", "60.0", False, "Refresh rate: 60 Hz"),
     ("system", "screen_brightness_mode", "1", False, "Adaptive brightness: on"),
+    ("secure", "adaptive_connectivity_enabled", "1", False, "Adaptive connectivity (4G when 5G is not needed): on"),
+    ("secure", "adaptive_charging_enabled", "1", True, "Adaptive charging (longer battery lifespan): on"),
+    ("secure", "send_action_app_error", "0", False, "Send app error reports: off"),
+    ("system", "samsung_errorlog_agree", "0", True, "Samsung diagnostic data: off"),
+    ("global", "wifi_verbose_logging_enabled", "0", False, "Wi-Fi verbose logging: off"),
     ("global", "battery_saver_constants", SAVER_CONSTANTS, False, "Stronger power saving mode"),
     ("global", "window_animation_scale", "0.5", False, "Window animations 0.5x"),
     ("global", "transition_animation_scale", "0.5", False, "Transition animations 0.5x"),
@@ -2396,6 +2415,117 @@ def radios_menu():
 
 
 # Checklist of what is applied right now.
+# --- extra savers: stronger, optional, never applied by MAX BATTERY. RESTORE undoes them. ---
+
+# Apps that only collect diagnostics or usage data. Disabled, not removed.
+TELEMETRY_APPS = ("com.samsung.android.dqagent", "com.sec.android.diagmonagent", "com.samsung.android.rubin.app",
+                  "com.nothing.logkit", "com.google.android.feedback", "com.miui.analytics", "com.miui.msa.global")
+
+
+def net_types():
+    """{SIM slot: allowed network types as a binary string}, from Android's own phone command."""
+    out = adb('for s in 0 1; do echo "#$s=$(cmd phone get-allowed-network-types-for-users -s $s 2>/dev/null)"; done')[1]
+    return {slot: m for slot, m in parse_marked(out).items() if re.fullmatch("[01]+", m)}
+
+
+def has_5g(mask):
+    """5G (NR) is network type 20, so bit 20 from the right."""
+    return len(mask) >= 20 and mask[-20] == "1"
+
+
+def set_5g(mask, on):
+    mask = mask.zfill(20)
+    return mask[:-20] + ("1" if on else "0") + mask[-19:]
+
+
+def parse_display(text):
+    """(width, height, density, override width or None) from "wm size; wm density"."""
+    size, dens = re.search(r"Physical size: (\d+)x(\d+)", text), re.search(r"Physical density: (\d+)", text)
+    over = re.search(r"Override size: (\d+)x", text)
+    return (int(size[1]), int(size[2]), int(dens[1]), int(over[1]) if over else None) if size and dens else None
+
+
+def scaled_display(w, h, d, factor):
+    """Smaller resolution with the same proportions; density shrinks too so everything keeps its size."""
+    half_up = lambda x: int(x + 0.5)   # like the website (Python's round() rounds halves to even)
+    return half_up(w * factor / 2) * 2, half_up(h * factor / 2) * 2, half_up(d * factor)
+
+
+def extras_menu(backup):
+    while True:
+        masks = net_types()
+        installed, off = package_names(adb("pm list packages")[1]), package_names(adb("pm list packages -d")[1])
+        tele = [p for p in TELEMETRY_APPS if p in installed]
+        disp = parse_display(adb("wm size; wm density")[1])
+        charge = adb("settings get global protect_battery")[1].strip()
+        g_off = bool(masks) and not any(has_5g(m) for m in masks.values())
+        tele_off = bool(tele) and all(p in off for p in tele)
+        rows, acts = [], []
+        if masks:
+            rows.append(f"[{'ON ' if g_off else 'OFF'}] 5G off: use 4G, which needs less power, most of all with weak signal")
+            acts.append("5g")
+        if tele:
+            rows.append(f"[{'ON ' if tele_off else 'OFF'}] Diagnostics apps off: {len(tele)} apps that only collect usage data")
+            acts.append("tele")
+        if disp:
+            now = f"{disp[3]} wide" if disp[3] else "native"
+            rows.append(f"      Screen resolution: {now} (lower = less work for the graphics chip)")
+            acts.append("res")
+        if charge in ("0", "1"):
+            rows.append(f"[{'ON ' if charge == '1' else 'OFF'}] Limit charging to 85% (Samsung): longer battery lifespan, less runtime per charge")
+            acts.append("charge")
+        if not rows:
+            print("This phone offers none of the extra savers over USB.")
+            return
+        chosen = pick("Extra savers", rows, "Optional, not part of MAX BATTERY | Enter = switch | RESTORE undoes them | Esc = back")
+        if not chosen:
+            return
+        act = acts[chosen[0]]
+        if act == "5g":
+            saved, commands = backup.setdefault("net_types", {}), []
+            for slot, m in masks.items():
+                if g_off:   # back on: the saved value, or just the 5G bit
+                    old = saved.pop(slot, None)
+                    to = old if old and has_5g(old) else set_5g(m, True)
+                else:
+                    saved.setdefault(slot, m)
+                    to = set_5g(m, False)
+                commands.append(f"cmd phone set-allowed-network-types-for-users -s {slot} {to}")
+            save_json(BACKUP_FILE, backup)
+            run_all(commands)
+            after = net_types()
+            ok = bool(after) and (any(has_5g(m) for m in after.values()) == g_off)
+            print(f"  5G is now {'allowed' if g_off else 'off'}." if ok else "  FAILED: the phone did not accept the change.")
+        elif act == "tele":
+            if tele_off:
+                run_all([f"pm enable --user 0 {p}" for p in tele])
+                backup.pop("telemetry_disabled", None)
+            else:
+                backup["telemetry_disabled"] = sorted(set(backup.get("telemetry_disabled", [])) | (set(tele) - off))
+                save_json(BACKUP_FILE, backup)
+                run_all([f"pm disable-user --user 0 {p}" for p in tele])
+            save_json(BACKUP_FILE, backup)
+        elif act == "res":
+            w, h, d, _ = disp
+            sizes = [(1, "Native"), (0.75, "75%"), (0.5, "50% (lowest)")]
+            pickd = pick("Resolution", [f"{name}: {scaled_display(w, h, d, f)[0]}x{scaled_display(w, h, d, f)[1]}" for f, name in sizes],
+                         "Enter = set | Esc = back")
+            if pickd:
+                f = sizes[pickd[0]][0]
+                sw, sh_, sd = scaled_display(w, h, d, f)
+                backup["resolution"] = True
+                save_json(BACKUP_FILE, backup)
+                adb("wm size reset; wm density reset" if f == 1 else f"wm size {sw}x{sh_}; wm density {sd}")
+        elif act == "charge":
+            saved = backup.setdefault("settings", {})
+            if charge == "1":
+                saved.pop("global/protect_battery", None)
+            else:
+                saved.setdefault("global/protect_battery", charge)
+            save_json(BACKUP_FILE, backup)
+            adb(f"settings put global protect_battery {'0' if charge == '1' else '1'}")
+
+
 def battery_use_menu(backup):
     """Apps that used the most battery since the last full charge. Enter restricts the selected ones."""
     out = adb("dumpsys batterystats --charged | grep -E '^ +U(ID|id) [u0-9a]+: [0-9.]+'")[1]
@@ -2505,6 +2635,11 @@ def restore_all():
     commands += [f"cmd netpolicy remove restrict-background-blacklist {u}" for u in backup.get("data_blocked", [])]
     if backup.get("data_saver") is False:
         commands.append("cmd netpolicy set restrict-background false")
+    commands += [f"cmd phone set-allowed-network-types-for-users -s {slot} {m}" for slot, m in backup.get("net_types", {}).items()
+                 if slot.isdigit() and re.fullmatch("[01]+", m)]
+    commands += [f"pm enable --user 0 {shlex.quote(p)}" for p in backup.get("telemetry_disabled", [])]
+    if backup.get("resolution"):
+        commands.append("wm size reset; wm density reset")
     run_all(commands)
     in_batches(backup.get("restricted", []), lambda q: "; ".join(
         [f"cmd appops set {q} {op} default" for op in RESTRICT_OPS] + [f"am set-standby-bucket {q} active"]))
@@ -2525,6 +2660,7 @@ def battery_menu():
         "Settings             power saving, dark mode, no AOD, no scanning, no wake gestures",
         "Deep sleep           sleep 30 seconds after the screen turns off",
         "Radios               Wi-Fi, mobile data, Bluetooth, NFC, location on or off",
+        "Extra savers         optional: 5G off, diagnostics apps off, lower resolution, charge limit",
         "Battery use          which apps used the most battery since the last charge",
         "Status               what is applied right now",
         "RESTORE              undo everything the Battery tool changed",
@@ -2555,6 +2691,8 @@ def battery_menu():
             apply_deep_sleep(backup)
         elif name == "Radios":
             radios_menu()
+        elif name == "Extra savers":
+            extras_menu(backup)
         elif name == "Battery use":
             battery_use_menu(backup)
         elif name == "Status":
@@ -2699,6 +2837,14 @@ def self_check():
     assert batt == {"level": 80, "temp": 31.5, "health": "good", "capacity": 4500}
     assert parse_battery("level: 10\nCharge counter: 400000\n")["capacity"] is None and parse_battery("")["level"] is None
     assert "set-mode 1" in power_saver_command(True) and power_saver_command(False).endswith("cmd battery reset")
+    lte_nr = "10001000000000000000"   # bit 20 = 5G, bit 16 = some 4G type
+    assert has_5g(lte_nr) and not has_5g(set_5g(lte_nr, False)) and set_5g(lte_nr, False) == "00001000000000000000"
+    assert set_5g(set_5g(lte_nr, False), True) == lte_nr and not has_5g("1111") and has_5g(set_5g("1111", True))
+    assert set_5g("1" * 32, False) == "1" * 12 + "0" + "1" * 19
+    shown = "Physical size: 1080x2412\nOverride size: 810x1809\nPhysical density: 420\nOverride density: 315\n"
+    assert parse_display(shown) == (1080, 2412, 420, 810) and parse_display("Physical size: 1080x2412\nPhysical density: 420\n")[3] is None
+    assert parse_display("error") is None and scaled_display(1080, 2412, 420, 0.75) == (810, 1810, 315)
+    assert scaled_display(1080, 2412, 420, 0.5) == (540, 1206, 210)
     assert fmt_size(999) == "999 B" and fmt_size(1500) == "1.5 KB" and fmt_size(250_000_000) == "250 MB"
     print("self-check ok")
 
