@@ -82,6 +82,7 @@
   .badge { font-size:11px; padding:2px 8px; border-radius:999px; background:var(--surface2); color:var(--muted); white-space:nowrap; }
   .badge.green { background:var(--green-soft); color:var(--green); }
   .badge.amber { background:var(--amber-soft); color:var(--amber); }
+  .badge.red { background:var(--red-soft); color:var(--red); }
   .badge.blue { background:var(--accent-soft); color:var(--accent); }
   .gear { background:none; border:0; color:var(--muted); padding:6px; border-radius:8px; cursor:pointer; flex:none; }
   .gear:hover { color:var(--text); background:var(--surface2); }
@@ -339,7 +340,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.8</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.9</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -954,7 +955,7 @@ async function loadNamesAndIcons() {
 let showAllSystem = loadJson("phone-show-all-system", false);
 let APPS = [], selected = new Set(), filter = "all", appsLoaded = false;
 const FILTERS = [["all", "All"], ["user", "Your apps"], ["extra", "Preinstalled"], ["system", "System (not recommended)"],
-  ["opt", "Optimized"], ["notopt", "Not optimized"], ["keep", "Keep list"], ["boot", "Starts at boot"], ["off", "Disabled or removed"], ["bloat", "Bloatware"]];
+  ["opt", "Optimized"], ["notopt", "Not optimized"], ["keep", "Keep list"], ["boot", "Starts at boot"], ["off", "Disabled or removed"], ["bloat", "Bloatware"], ["google", "Google"]];
 // Per-app switches. ops = app-ops set to allow / ignore.
 const CONTROLS = [
   { key: "bg", label: "Run in background", help: "Off = sleeps until you open it", ops: ["RUN_ANY_IN_BACKGROUND", "RUN_IN_BACKGROUND"] },
@@ -1012,8 +1013,9 @@ function visibleApps() {
   const s = $("#search").value.trim().toLowerCase(), keep = currentKeep();
   const test = { all: () => true, user: (a) => a.tier === 1, extra: (a) => a.tier === 2, system: (a) => a.tier >= 3,
     opt: (a) => a.optimized, notopt: (a) => !a.optimized, keep: (a) => keep.has(a.p), boot: (a) => a.boot, off: (a) => a.off,
-    bloat: (a) => a.tier !== 1 && BLOAT.test(a.p) }[filter];
-  return APPS.filter((a) => (a.tier < 4 || a.optimized || a.off || showAllSystem || filter === "bloat") && test(a) && (!s || a.name.toLowerCase().includes(s) || a.p.includes(s)));
+    bloat: (a) => a.tier !== 1 && BLOAT.test(a.p),
+    google: (a) => /^com\.google\.|^com\.android\.(vending|chrome)$/.test(a.p) }[filter];
+  return APPS.filter((a) => (a.tier < 4 || a.optimized || a.off || showAllSystem || filter === "bloat" || filter === "google") && test(a) && (!s || a.name.toLowerCase().includes(s) || a.p.includes(s)));
 }
 
 function appRow(a, keep) {
@@ -1021,6 +1023,7 @@ function appRow(a, keep) {
   row.dataset.p = a.p;
   const info = el("div", "info"); info.append(el("div", "name", a.name), el("div", "pkg", a.p));
   const badges = el("div", "badges");
+  if (isUnsafe(a) && !a.removed) badges.append(el("span", "badge red", "Unsafe to remove"));
   if (a.off) badges.append(el("span", "badge amber", a.removed ? "Removed" : "Disabled"));
   if (keep.has(a.p)) badges.append(el("span", "badge blue", "Keep"));
   if (a.optimized) badges.append(el("span", "badge green", "Optimized"));
@@ -1156,9 +1159,28 @@ function recordData(apps, block) {
   b.data_blocked = [...rec].sort(); saveBackup(b);
 }
 
+// Unsafe to remove: Android's own parts, the phone maker's parts, and what calls, unlocking or USB need.
+const isUnsafe = (a) => a.tier >= 3 || PROTECTED_APPS.test(a.p);
+// Second confirmation before removing unsafe packages: the word REMOVE has to be typed.
+async function confirmUnsafe(apps) {
+  const risky = apps.filter(isUnsafe);
+  if (!risky.length) return true;
+  const typed = el("input", "search"); typed.placeholder = "Type REMOVE"; typed.style.cssText = "width:100%;margin-top:8px";
+  typed.setAttribute("aria-label", "Type REMOVE to confirm");
+  const critical = risky.filter((a) => PROTECTED_APPS.test(a.p));
+  const ok = await modal(`UNSAFE: remove ${risky.length} system part${risky.length > 1 ? "s" : ""}?`,
+    risky.slice(0, 10).map((a) => `  ${a.name} (${a.p})`).join("\n") + (risky.length > 10 ? `\n  ...and ${risky.length - 10} more` : "") +
+    "\n\nThese belong to Android, Google or the phone maker. Removing them can break calls, the lock screen, notifications, the Play Store or apps that need Google services." +
+    (critical.length ? `\n\n${critical.length} of them (${critical.slice(0, 3).map((a) => a.name).join(", ")}) are needed to start the phone, to unlock it or for this USB connection. Without them the phone may stop working, and this tool may not be able to bring them back.` : "") +
+    "\n\nIf the phone breaks, only a factory reset brings them back, and that erases your data. Without root they are removed for you with all their data; their file stays in the read-only system image, which nothing can delete.",
+    [["Cancel", ""], ["Remove anyway", "ok", "primary"]], typed);
+  if (ok !== "ok") return false;
+  if (typed.value.trim() !== "REMOVE") { toast("Not removed: type REMOVE to confirm."); return false; }
+  return true;
+}
+
 async function applyToApps(pkgs, want, btn) {
-  // Parts the phone needs (calls, unlocking, this USB connection) are never removed.
-  const apps = APPS.filter((a) => pkgs.includes(a.p) && !(want.app === "remove" && PROTECTED_APPS.test(a.p)));
+  const apps = APPS.filter((a) => pkgs.includes(a.p));
   const n = CONTROLS.filter((c) => want[c.key]).length + !!want.bucket + !!want.keep + !!want.app + !!want.stop;
   if (!n) { toast("Nothing to change yet: pick at least one setting or a preset."); return; }
   const system = apps.filter((a) => a.tier >= 3).length;
@@ -1168,6 +1190,7 @@ async function applyToApps(pkgs, want, btn) {
       apps.slice(0, 8).map((a) => "  " + a.name).join("\n") + (apps.length > 8 ? `\n  ...and ${apps.length - 8} more` : "") +
       `\n\nApps you installed are uninstalled with their data.` + (pre ? ` ${pre} preinstalled ones are removed for you and can be brought back: filter "Disabled or removed", then Enable.` : "") +
       (system ? `\n\n${system} are system parts: removing those can break phone features.` : ""), "Remove")) return;
+    if (!await confirmUnsafe(apps)) return;
   } else if (system || want.app === "disable") {
     const warn = [system && `${system} of them are system parts. Restricting those can break phone features.`,
       want.app === "disable" && "Disabled apps disappear from the phone until you enable them again here."].filter(Boolean).join("\n\n");
@@ -1247,10 +1270,11 @@ async function appSettings(a) {
   sw("keep", "Keep list", "Never restricted by MAX BATTERY", keepNow, (v) => { const k = currentKeep(); v ? k.add(a.p) : k.delete(a.p); saveKeep(k); renderKeepInfo(); return []; });
 
   // One-off actions: these run when clicked, after a confirmation.
-  const action = (label, cls, question, cmd) => {
+  const action = (label, cls, question, cmd, unsafe) => {
     const b = el("button", "btn " + cls, label);
     b.onclick = async () => {
       if (question && !await confirmWithLock(label + "?", question, label)) return;
+      if (unsafe && !await confirmUnsafe([a])) return;
       runButton(b, async () => { log(`${label} ${a.p}: ${(await sh(cmd)).trim()}`); });
     };
     return b;
@@ -1259,8 +1283,8 @@ async function appSettings(a) {
   actions.append(action("Force stop", "", "", `am force-stop ${q(a.p)}`),
     action("Clear data", "danger", `Erase all data of ${a.name} (sign-ins, settings, files). It stays installed.`, `pm clear ${q(a.p)}`));
   if (a.tier === 1) actions.append(action("Uninstall", "danger", `Remove ${a.name} from the phone.`, `pm uninstall ${q(a.p)}`));
-  else if (!a.removed && !PROTECTED_APPS.test(a.p)) actions.append(action("Remove", "danger",
-    `Remove the preinstalled app ${a.name} for you. It can be brought back: filter "Disabled or removed", then Enable.`, `pm uninstall --user 0 ${q(a.p)}`));
+  else if (!a.removed) actions.append(action(isUnsafe(a) ? "Remove (unsafe)" : "Remove", "danger",
+    `Remove the preinstalled app ${a.name} with all its data. It can be brought back: filter "Disabled or removed", then Enable.`, `pm uninstall --user 0 ${q(a.p)}`, true));
 
   // After Apply the window reads the phone again, because "Start at boot" and "Run in background" share a switch.
   apply.onclick = () => runButton(apply, async (set) => {
@@ -1888,15 +1912,16 @@ function renderStorageBar() {
 }
 
 async function storageAppAction(btn, rows, what) {
-  // Uninstall: only apps you installed (preinstalled ones can be disabled in the Apps tab instead).
+  // Uninstall: anything, with a second confirmation for system parts.
   // Clear data: never for parts that calls, unlocking or this USB connection need.
-  const ok = rows.filter((x) => (what === "uninstall" && x.a.tier === 1) || (!PROTECTED_APPS.test(x.p) && x.a.tier < 4));
+  const ok = rows.filter((x) => what === "uninstall" || (!PROTECTED_APPS.test(x.p) && x.a.tier < 4));
   const skipped = rows.length - ok.length;
   if (!ok.length) { await modal("Not possible", "These are system parts the phone needs.", [["OK", "ok", "primary"]]); return; }
   const names = ok.slice(0, 8).map((x) => x.a.name).join(", ") + (ok.length > 8 ? ` and ${ok.length - 8} more` : "");
   const text = (what === "uninstall" ? `Remove ${ok.length} apps from the phone: ${names}. Preinstalled ones can be brought back in the Apps tab (filter "Disabled or removed", then Enable).` : `Erase all data of ${ok.length} apps (sign-ins, settings, files): ${names}. They stay installed.`) +
     (skipped ? `\n\n${skipped} selected ${skipped > 1 ? "are" : "is"} skipped (system parts).` : "");
   if (!await confirmWithLock(what === "uninstall" ? "Uninstall?" : "Clear data?", text, what === "uninstall" ? "Uninstall" : "Clear data")) return;
+  if (what === "uninstall" && !await confirmUnsafe(ok.map((x) => x.a))) return;
   await runButton(btn, async (set) => {
     let done = 0, failed = 0;
     for (const x of ok) {

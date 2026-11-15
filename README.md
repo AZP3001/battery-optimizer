@@ -8,6 +8,7 @@ ADB-based battery optimizer and cleanup tool for Android. Runs from Linux, Windo
 
 - **MAX BATTERY**: power saving, dark mode, deep sleep, battery settings, app restrictions and background data blocking in one step. `RESTORE` undoes it.
 - **Extra savers** (optional, never applied by MAX BATTERY): 5G off, diagnostics apps off, lower screen resolution, 85% charge limit on Samsung.
+- **Uninstall anything**: every package, Google services and system parts included, marked unsafe and behind a double confirmation (screen lock, then typing REMOVE). Without root a preinstalled app is removed for your user with its data; its file stays in the read-only system image.
 - **Bloatware**: remove preinstalled apps (Netflix, Meta services, ...) for your user; they can be brought back.
 - **Sleep now**: screen off and straight into deep sleep.
 - **Awake right now**: which apps hold the processor awake, plus screen-on time and heat state.

@@ -93,6 +93,11 @@ phonehelp() {
                Keyboard learned words erases saved words and predictions.
                Screen lock & fingerprints removes the lock, and needs your
                current PIN, password or pattern.
+               Uninstall anything (unsafe) lists every package, system parts
+               and Google services included. Unsafe ones are marked and ask
+               for the screen lock and the word REMOVE. Without root a
+               preinstalled app is removed for you with its data; its file
+               stays in the system image.
                Disable apps & services lists your apps first, then safe
                preinstalled extras, then system parts (not recommended).
                Critical system parts are hidden. Enter switches it off or
@@ -1252,6 +1257,49 @@ def disable_custom(labels):
 
 
 # Menu: switch apps and background services off or back on.
+def uninstall_menu():
+    """Uninstall anything, system parts included. Unsafe ones are marked and need a second, typed confirmation."""
+    print("Apps you installed are uninstalled completely. Preinstalled ones are removed for you with all their data:")
+    print("without root their file stays in the read-only system image, which nothing can delete.")
+    print("Bring one back with 'Disable apps & services' > ENABLE ALL or CUSTOM. A factory reset brings all back.")
+    apks = parse_package_paths(adb("pm list packages -f")[1])
+    labels, tiers = load_labels(apks), load_tiers()
+    while True:
+        user, installed = user_packages(), package_names(adb("pm list packages")[1])
+
+        def unsafe(p):
+            return package_tier(p, user, tiers) >= 3 or bool(PROTECTED_APPS.search(p))
+
+        def name(p):
+            return package_name(p, labels, tiers) or p
+
+        order = sorted(installed, key=lambda p: (package_tier(p, user, tiers), name(p).casefold()))
+        rows = [f"{'[UNSAFE] ' if unsafe(p) else ''}{name(p)} ({p})" for p in order]
+        chosen = pick("Uninstall", rows, "Your apps first, system parts last | Enter = uninstall | Tab = select several | Esc = back",
+                      multi=True)
+        if not chosen:
+            return
+        selected = [order[i] for i in chosen]
+        risky = [p for p in selected if unsafe(p)]
+        for p in selected[:10]:
+            print(f"  {'[UNSAFE] ' if p in risky else ''}{name(p)}")
+        if len(selected) > 10:
+            print(f"  ...and {len(selected) - 10} more")
+        if not verify_lock(f"To uninstall {len(selected)},"):
+            continue
+        if risky:
+            print(f"UNSAFE: {len(risky)} of them belong to Android, Google or the phone maker. Removing them can break calls,")
+            print("the lock screen, notifications, the Play Store or this USB connection. If the phone breaks, only a")
+            print("factory reset brings them back, and that erases your data.")
+            if ask("Type REMOVE to uninstall them anyway: ") != "REMOVE":
+                print("Cancelled.")
+                continue
+        for p in selected:
+            q = shlex.quote(p)
+            _, out, err = adb(f"pm uninstall {q}" if p in user else f"pm uninstall --user 0 {q}")
+            print(f"  uninstalled: {name(p)}" if "Success" in out else f"  FAILED: {name(p)}: {first_error(out, err)}")
+
+
 def disable_menu():
     print("Loading apps and services...")
     apks = parse_package_paths(adb("pm list packages -f -u")[1])
@@ -1962,7 +2010,7 @@ def restore_menu():
 def main_menu():
     names = list(FILE_CATEGORIES) + list(CONTENT_CATEGORIES) + ["Back up apps", "Restore backups"] + [
         "Apps", "App data", "System app data (no delete all)", "Settings", "Keyboard learned words", "Screen lock & fingerprints",
-        "Disable apps & services", "Close apps & free RAM", "Notifications", "Flush free space"]
+        "Disable apps & services", "Uninstall anything (unsafe)", "Close apps & free RAM", "Notifications", "Flush free space"]
     while True:
         chosen = pick("Cleanup", names, "Enter = open | Esc = quit")
         if not chosen:
@@ -1987,6 +2035,8 @@ def main_menu():
                    "Words synced to a cloud account are not touched.")
         elif name == "Screen lock & fingerprints":
             lock_menu()
+        elif name.startswith("Uninstall anything"):
+            uninstall_menu()
         elif name == "Disable apps & services":
             disable_menu()
         elif name == "Close apps & free RAM":
