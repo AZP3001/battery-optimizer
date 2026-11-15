@@ -340,7 +340,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.9</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.10</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -1148,7 +1148,7 @@ function commandsFor(a, want) {
   if (want.app === "disable") cmds.push(`pm disable-user --user 0 ${p}`);
   // "install-existing" brings back a preinstalled app that was removed for this user
   if (want.app === "enable") cmds.push(`pm enable --user 0 ${p}`, `cmd package install-existing --user 0 ${p} >/dev/null 2>&1`);
-  if (want.app === "remove") cmds.push(a.tier === 1 ? `pm uninstall ${p}` : `pm uninstall --user 0 ${p}`);
+  if (want.app === "remove") cmds.push(a.tier === 1 ? `pm uninstall ${p}` : fullUninstall(p));
   if (want.stop) cmds.push(`am force-stop ${p}`);
   return cmds;
 }
@@ -1159,6 +1159,13 @@ function recordData(apps, block) {
   b.data_blocked = [...rec].sort(); saveBackup(b);
 }
 
+// The most complete uninstall Android allows without root, for one quoted package:
+// 1. "pm uninstall" removes an app you installed entirely, or deletes a preinstalled app's updates from storage;
+// 2. the loop removes it, with its data, for every user and profile on the phone.
+// What is left of a preinstalled app is only its factory file in the read-only system image.
+const fullUninstall = (p) => `pm uninstall ${p}; for u in $(pm list users | grep -o 'UserInfo{[0-9]*' | grep -o '[0-9]*$'); do pm uninstall --user $u ${p}; done`;
+const DEVICE_ADMIN_HINT = "The phone refused because the app is a device admin app (Google Play Services is one, for Find My Device). " +
+  "On the phone: Settings > Security > Device admin apps, switch it off there, then remove it again.";
 // Unsafe to remove: Android's own parts, the phone maker's parts, and what calls, unlocking or USB need.
 const isUnsafe = (a) => a.tier >= 3 || PROTECTED_APPS.test(a.p);
 // Second confirmation before removing unsafe packages: the word REMOVE has to be typed.
@@ -1172,7 +1179,7 @@ async function confirmUnsafe(apps) {
     risky.slice(0, 10).map((a) => `  ${a.name} (${a.p})`).join("\n") + (risky.length > 10 ? `\n  ...and ${risky.length - 10} more` : "") +
     "\n\nThese belong to Android, Google or the phone maker. Removing them can break calls, the lock screen, notifications, the Play Store or apps that need Google services." +
     (critical.length ? `\n\n${critical.length} of them (${critical.slice(0, 3).map((a) => a.name).join(", ")}) are needed to start the phone, to unlock it or for this USB connection. Without them the phone may stop working, and this tool may not be able to bring them back.` : "") +
-    "\n\nIf the phone breaks, only a factory reset brings them back, and that erases your data. Without root they are removed for you with all their data; their file stays in the read-only system image, which nothing can delete.",
+    "\n\nIf the phone breaks, only a factory reset brings them back, and that erases your data. Their updates are deleted and they are removed for every user with all their data. Only the factory file stays in the read-only system image: deleting that needs root.",
     [["Cancel", ""], ["Remove anyway", "ok", "primary"]], typed);
   if (ok !== "ok") return false;
   if (typed.value.trim() !== "REMOVE") { toast("Not removed: type REMOVE to confirm."); return false; }
@@ -1188,7 +1195,7 @@ async function applyToApps(pkgs, want, btn) {
     const pre = apps.filter((a) => a.tier !== 1).length;
     if (!apps.length || !await confirmWithLock(`Remove ${apps.length} apps?`,
       apps.slice(0, 8).map((a) => "  " + a.name).join("\n") + (apps.length > 8 ? `\n  ...and ${apps.length - 8} more` : "") +
-      `\n\nApps you installed are uninstalled with their data.` + (pre ? ` ${pre} preinstalled ones are removed for you and can be brought back: filter "Disabled or removed", then Enable.` : "") +
+      `\n\nApps you installed are uninstalled with their data.` + (pre ? ` For ${pre} preinstalled ones the updates are deleted and they are removed for every user; they can be brought back: filter "Disabled or removed", then Enable.` : "") +
       (system ? `\n\n${system} are system parts: removing those can break phone features.` : ""), "Remove")) return;
     if (!await confirmUnsafe(apps)) return;
   } else if (system || want.app === "disable") {
@@ -1199,16 +1206,25 @@ async function applyToApps(pkgs, want, btn) {
   await runButton(btn, async (set) => {
     if (want.data) recordData(apps, want.data === "block");
     if (want.keep) { const k = currentKeep(); apps.forEach((a) => (want.keep === "add" ? k.add(a.p) : k.delete(a.p))); saveKeep(k); }
-    let done = 0;
+    let done = 0, refusals = "";
     for (const group of chunk(apps, 10)) {
       set(`Applying ${done}/${apps.length}...`);
       const cmds = group.flatMap((a) => commandsFor(a, want));
-      if (cmds.length) await sh(cmds.join("; "));
+      if (cmds.length) refusals += await sh(cmds.join("; "));
       done += group.length;
     }
     log(`Applied to ${apps.length} apps: ${JSON.stringify(want)}`);
     set("Checking...");
     await loadApps({ keepSide: true });
+    if (want.app === "remove") {
+      // what is still installed was refused by the phone
+      const left = apps.filter((a) => APPS.some((x) => x.p === a.p && !x.removed));
+      left.forEach((a) => log(`NOT removed: ${a.name} (${a.p})`));
+      if (left.length) {
+        log(/DEVICE_POLICY_MANAGER/.test(refusals) ? DEVICE_ADMIN_HINT : "The phone refused: " + firstError(refusals.replace(/^Success.*$/gm, "")));
+        return `⚠ ${left.length} not removed`;
+      }
+    }
   });
 }
 
@@ -1284,7 +1300,7 @@ async function appSettings(a) {
     action("Clear data", "danger", `Erase all data of ${a.name} (sign-ins, settings, files). It stays installed.`, `pm clear ${q(a.p)}`));
   if (a.tier === 1) actions.append(action("Uninstall", "danger", `Remove ${a.name} from the phone.`, `pm uninstall ${q(a.p)}`));
   else if (!a.removed) actions.append(action(isUnsafe(a) ? "Remove (unsafe)" : "Remove", "danger",
-    `Remove the preinstalled app ${a.name} with all its data. It can be brought back: filter "Disabled or removed", then Enable.`, `pm uninstall --user 0 ${q(a.p)}`, true));
+    `Remove the preinstalled app ${a.name}: its updates are deleted and it is removed for every user, with all its data. It can be brought back: filter "Disabled or removed", then Enable.`, fullUninstall(q(a.p)), true));
 
   // After Apply the window reads the phone again, because "Start at boot" and "Run in background" share a switch.
   apply.onclick = () => runButton(apply, async (set) => {
@@ -1926,7 +1942,7 @@ async function storageAppAction(btn, rows, what) {
     let done = 0, failed = 0;
     for (const x of ok) {
       set(`${what === "uninstall" ? "Uninstalling" : "Clearing"} ${++done}/${ok.length}...`);
-      const out = (await sh(`pm ${what === "uninstall" ? (x.a.tier === 1 ? "uninstall" : "uninstall --user 0") : "clear"} ${q(x.p)}`)).trim();
+      const out = (await sh(what !== "uninstall" ? `pm clear ${q(x.p)}` : x.a.tier === 1 ? `pm uninstall ${q(x.p)}` : fullUninstall(q(x.p)))).trim();
       if (!out.includes("Success")) { failed++; log(`FAILED ${x.p}: ${out}`); }
       else { storageSel.delete(x.p); log(`${what === "uninstall" ? "Uninstalled" : "Cleared"}: ${x.a.name}`); }
     }

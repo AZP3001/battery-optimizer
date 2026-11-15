@@ -95,9 +95,10 @@ phonehelp() {
                current PIN, password or pattern.
                Uninstall anything (unsafe) lists every package, system parts
                and Google services included. Unsafe ones are marked and ask
-               for the screen lock and the word REMOVE. Without root a
-               preinstalled app is removed for you with its data; its file
-               stays in the system image.
+               for the screen lock and the word REMOVE. For a preinstalled
+               app the updates are deleted and it is removed for every user
+               with its data; only its factory file stays in the read-only
+               system image (deleting that needs root).
                Disable apps & services lists your apps first, then safe
                preinstalled extras, then system parts (not recommended).
                Critical system parts are hidden. Enter switches it off or
@@ -1257,10 +1258,20 @@ def disable_custom(labels):
 
 
 # Menu: switch apps and background services off or back on.
+def full_uninstall(q):
+    """The most complete uninstall Android allows without root, for one quoted package:
+    "pm uninstall" removes an app you installed entirely, or deletes a preinstalled app's updates from storage;
+    the loop then removes it, with its data, for every user and profile on the phone.
+    What is left of a preinstalled app is only its factory file in the read-only system image."""
+    return (f"pm uninstall {q}; for u in $(pm list users | grep -o 'UserInfo{{[0-9]*' | grep -o '[0-9]*$'); "
+            f"do pm uninstall --user $u {q}; done")
+
+
 def uninstall_menu():
     """Uninstall anything, system parts included. Unsafe ones are marked and need a second, typed confirmation."""
-    print("Apps you installed are uninstalled completely. Preinstalled ones are removed for you with all their data:")
-    print("without root their file stays in the read-only system image, which nothing can delete.")
+    print("Apps you installed are uninstalled completely. For preinstalled ones the updates are deleted and they are")
+    print("removed for every user with all their data. Only the factory file stays in the read-only system image:")
+    print("deleting that needs root.")
     print("Bring one back with 'Disable apps & services' > ENABLE ALL or CUSTOM. A factory reset brings all back.")
     apks = parse_package_paths(adb("pm list packages -f")[1])
     labels, tiers = load_labels(apks), load_tiers()
@@ -1296,8 +1307,12 @@ def uninstall_menu():
                 continue
         for p in selected:
             q = shlex.quote(p)
-            _, out, err = adb(f"pm uninstall {q}" if p in user else f"pm uninstall --user 0 {q}")
-            print(f"  uninstalled: {name(p)}" if "Success" in out else f"  FAILED: {name(p)}: {first_error(out, err)}")
+            _, out, err = adb(f"pm uninstall {q}" if p in user else full_uninstall(q))
+            gone = p not in package_names(adb("pm list packages")[1])
+            print(f"  uninstalled: {name(p)}" if gone else f"  FAILED: {name(p)}: {first_error(out, err)}")
+            if not gone and "DEVICE_POLICY_MANAGER" in out + err:
+                print("    It is a device admin app (Google Play Services is one, for Find My Device). On the phone:")
+                print("    Settings > Security > Device admin apps, switch it off there, then uninstall it again.")
 
 
 def disable_menu():
@@ -2971,6 +2986,8 @@ def self_check():
     held = ("  PARTIAL_WAKE_LOCK              'AudioMix' ACQ=-1m2s (uid=1041 pid=0)\n"
             "  PARTIAL_WAKE_LOCK 'job/x' ACQ=-3s (uid=1000 pid=1 ws=WorkSource{10213 com.a})\n  SCREEN_BRIGHT_WAKE_LOCK 'w' (uid=1000 pid=2)\n")
     assert parse_wake_locks(held) == [("1041", "AudioMix"), ("10213", "job/x")] and parse_wake_locks("") == []
+    assert full_uninstall("'com.a'").startswith("pm uninstall 'com.a'; for u in $(pm list users")
+    assert "UserInfo{[0-9]*'" in full_uninstall("x") and full_uninstall("x").endswith("do pm uninstall --user $u x; done")
     assert fmt_size(999) == "999 B" and fmt_size(1500) == "1.5 KB" and fmt_size(250_000_000) == "250 MB"
     print("self-check ok")
 
