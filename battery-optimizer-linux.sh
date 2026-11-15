@@ -164,7 +164,7 @@ tiers() {
 2 com.android.dreams.basic Screensavers
 2 com.android.bips Print Service
 2 com.android.printspooler Print Spooler
-2 com.android.htmlviewer HTML Viewer
+3 com.android.htmlviewer HTML Viewer
 2 com.android.traceur System Tracing
 2 com.android.wallpaper.livepicker Live Wallpaper Picker
 2 com.android.hotwordenrollment.okgoogle Hey Google Enrollment
@@ -1309,6 +1309,11 @@ def uninstall_menu():
             q = shlex.quote(p)
             _, out, err = adb(f"pm uninstall {q}" if p in user else full_uninstall(q))
             gone = p not in package_names(adb("pm list packages")[1])
+            if not gone and p not in user:   # the phone refused: disable it instead
+                adb(f"pm disable-user --user 0 {q}")
+                if p in package_names(adb("pm list packages -d")[1]):
+                    print(f"  the phone refused to uninstall {name(p)}, so it is disabled instead.")
+                    continue
             print(f"  uninstalled: {name(p)}" if gone else f"  FAILED: {name(p)}: {first_error(out, err)}")
             if not gone and "DEVICE_POLICY_MANAGER" in out + err:
                 print("    It is a device admin app (Google Play Services is one, for Find My Device). On the phone:")

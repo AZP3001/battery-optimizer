@@ -340,7 +340,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.10</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.11</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -536,7 +536,7 @@ function displaySizes(disp, modes) {
 }
 const sizeName = (w) => ({ 720: "HD+", 1080: "FHD+", 1440: "WQHD+" }[w] || "");
 // Preinstalled apps most people never asked for (only apps you did not install yourself count).
-const BLOAT = /^com\.(netflix|facebook|linkedin|spotify|zhiliaoapp|ss\.android\.ugc|booking|amazon\.|king\.|microsoft\.(skydrive|appmanager|office)|hiya|opera|snapchat|dti\.|aura\.|ironsource|digitalturbine|samsung\.android\.(game\.gamehome|bixby|arzone|aremoji|stickercenter|kidsinstaller|app\.spage|tvplus)|sec\.android\.app\.(samsungapps|kidshome)|nothing\.(experience|userguide)|google\.android\.(apps\.(youtube\.music|tachyon|subscriptions\.red|magazines|podcasts)|videos))/;
+const BLOAT = /^com\.(netflix|facebook|linkedin|spotify|zhiliaoapp|ss\.android\.ugc|booking|amazon\.|king\.|microsoft\.(skydrive|appmanager|office)|hiya|opera|snapchat|dti\.|aura\.|ironsource|digitalturbine|samsung\.android\.(game\.gamehome|bixby|arzone|aremoji|stickercenter|kidsinstaller|app\.spage|tvplus)|sec\.android\.app\.(samsungapps|kidshome)|nothing\.(experience|userguide)|miui\.(analytics|msa|videoplayer|player|yellowpage|cloudbackup|cloudservice|micloudsync|bugreport|miservice|daemon|android\.fashiongallery|cleaner)|xiaomi\.(mipicks|joyose|payment|discover|glgm|ugd|barrage|micloud)|mi\.(globalbrowser|globalminusscreen)|samsung\.android\.(app\.tips|themestore|forest|scloud|mateagent|ardrawing|visionintelligence)|vodafone|google\.android\.(apps\.(youtube\.music|tachyon|subscriptions\.red|magazines|podcasts)|videos))/;
 
 // Android refuses to switch power saving while the phone charges, and over USB it always charges.
 // So the charger is hidden from Android for a moment ("unplug" is only pretend, "reset" undoes it).
@@ -1162,8 +1162,9 @@ function recordData(apps, block) {
 // The most complete uninstall Android allows without root, for one quoted package:
 // 1. "pm uninstall" removes an app you installed entirely, or deletes a preinstalled app's updates from storage;
 // 2. the loop removes it, with its data, for every user and profile on the phone.
+// 3. if the phone refuses, the app is disabled instead.
 // What is left of a preinstalled app is only its factory file in the read-only system image.
-const fullUninstall = (p) => `pm uninstall ${p}; for u in $(pm list users | grep -o 'UserInfo{[0-9]*' | grep -o '[0-9]*$'); do pm uninstall --user $u ${p}; done`;
+const fullUninstall = (p) => `pm uninstall ${p}; for u in $(pm list users | grep -o 'UserInfo{[0-9]*' | grep -o '[0-9]*$'); do pm uninstall --user $u ${p}; done; pm list packages | grep -qx package:${p} && pm disable-user --user 0 ${p}`;
 const DEVICE_ADMIN_HINT = "The phone refused because the app is a device admin app (Google Play Services is one, for Find My Device). " +
   "On the phone: Settings > Security > Device admin apps, switch it off there, then remove it again.";
 // Unsafe to remove: Android's own parts, the phone maker's parts, and what calls, unlocking or USB need.
@@ -1218,7 +1219,9 @@ async function applyToApps(pkgs, want, btn) {
     await loadApps({ keepSide: true });
     if (want.app === "remove") {
       // what is still installed was refused by the phone
-      const left = apps.filter((a) => APPS.some((x) => x.p === a.p && !x.removed));
+      const still = apps.filter((a) => APPS.some((x) => x.p === a.p && !x.removed));
+      const left = still.filter((a) => !APPS.find((x) => x.p === a.p).off);
+      still.filter((a) => !left.includes(a)).forEach((a) => log(`The phone refused to uninstall ${a.name} (${a.p}), so it is disabled instead.`));
       left.forEach((a) => log(`NOT removed: ${a.name} (${a.p})`));
       if (left.length) {
         log(/DEVICE_POLICY_MANAGER/.test(refusals) ? DEVICE_ADMIN_HINT : "The phone refused: " + firstError(refusals.replace(/^Success.*$/gm, "")));
