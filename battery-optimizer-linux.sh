@@ -81,8 +81,7 @@ phonehelp() {
                apps, app data or settings. Then delete single items or use
                DELETE ALL. Files are overwritten before removal and skip the
                trash. Files and apps are listed biggest first, with sizes.
-               Opening Cleanup and every delete ask for the phone's screen
-               lock. Back up apps saves each app as a .zip in ~/phone-backups
+               The phone's screen lock is asked once, when the tool starts. Back up apps saves each app as a .zip in ~/phone-backups
                (the app, its Android/data and Android/obb files, optionally
                Android's own backup); Restore backups puts them back. Logins
                usually do not survive: without root, private data stays on
@@ -95,7 +94,7 @@ phonehelp() {
                current PIN, password or pattern.
                Uninstall anything (unsafe) lists every package, system parts
                and Google services included. Unsafe ones are marked and ask
-               for the screen lock and the word REMOVE. For a preinstalled
+               you to type the word REMOVE. For a preinstalled
                app the updates are deleted and it is removed for every user
                with its data; only its factory file stays in the read-only
                system image (deleting that needs root).
@@ -1107,8 +1106,8 @@ def verify_lock(why):
         if re.search("verified successfully", out + err, re.I):
             return True
         if re.search(r"unknown command|usage:", out + err, re.I) and not re.search("didn't match|wrong", out + err, re.I):
-            print("This phone does not let USB debugging check the screen lock.")
-            return False
+            print("This phone cannot check its screen lock over USB, so it is not asked.")
+            return True
         print("Too many wrong tries: the phone makes you wait. Try again later." if re.search("throttl|try again", out + err, re.I)
               else "Wrong screen lock. Wrong tries count as failed unlock attempts on the phone.")
 
@@ -1296,7 +1295,8 @@ def uninstall_menu():
             print(f"  {'[UNSAFE] ' if p in risky else ''}{name(p)}")
         if len(selected) > 10:
             print(f"  ...and {len(selected) - 10} more")
-        if not verify_lock(f"To uninstall {len(selected)},"):
+        if ask(f"Uninstall {len(selected)}? [y/N] ").lower() != "y":
+            print("Cancelled.")
             continue
         if risky:
             print(f"UNSAFE: {len(risky)} of them belong to Android, Google or the phone maker. Removing them can break calls,")
@@ -1875,7 +1875,8 @@ def browse(title, load, delete, note="", allow_all=True, delete_many=None):
             return
         if allow_all and 0 in chosen:
             print(f"This permanently deletes all {len(items)} items in {title}.")
-            if not verify_lock("To delete everything,"):
+            if ask("Type DELETE to confirm: ") != "DELETE":
+                print("Cancelled.")
                 continue
             selected = items
         else:
@@ -1884,7 +1885,8 @@ def browse(title, load, delete, note="", allow_all=True, delete_many=None):
                 print(f"  {label}")
             if len(selected) > 5:
                 print(f"  ...and {len(selected) - 5} more")
-            if not verify_lock(f"To permanently delete {len(selected)},"):
+            if ask(f"Permanently delete {len(selected)}? [y/N] ").lower() != "y":
+                print("Cancelled.")
                 continue
         failed = delete_items(selected, delete, delete_many)
         gone = {item for item, _ in selected} - {item for item, _ in failed}
@@ -2015,7 +2017,7 @@ def restore_menu():
         print(f"No backups in {BACKUP_DIR}. Backups from the website can be copied there too.")
         return
     chosen = pick("Restore", zips, "Enter = restore | Tab = select several | Esc = back", multi=True)
-    if not chosen or not verify_lock("To restore (this replaces the app and its data on the phone),"):
+    if not chosen or ask("Restore? This replaces the app and its data on the phone. [y/N] ").lower() != "y":
         return
     for i in chosen:
         print(f"Restoring {zips[i]}...")
@@ -3097,6 +3099,10 @@ def main():
         if not shutil.which(tool):
             sys.exit(f"{tool} is not installed.")
     require_phone()
+    if os.environ.get("PHONE_VERIFIED") != "1" and not verify_lock("One check before anything is shown or changed."):
+        sys.exit(1)
+    if sys.argv[1:] == ["--verify"]:
+        return
     try:
         if sys.argv[1:] == ["--battery"]:
             battery_menu()
@@ -3104,7 +3110,7 @@ def main():
             permissions_menu()
         elif sys.argv[1:] == ["--store"]:
             store_menu()
-        elif verify_lock("Cleanup is locked."):
+        else:
             main_menu()
     except KeyboardInterrupt:
         print("\nStopped.")
@@ -3123,6 +3129,8 @@ return $rc
 case "$1" in
     "")
         # One entry point: every phone tool is a row in this menu and opens its own menu.
+        cleanup --verify || exit 1   # the screen lock, once; the tools below then skip it
+        export PHONE_VERIFIED=1
         while choice=$(printf '%s\n' \
             "Battery        maximum battery life: apps, settings, deep sleep, mobile data" \
             "Optimize       stop apps running in the background" \
@@ -3144,7 +3152,7 @@ case "$1" in
                 Help*)        phonehelp | less;;
             esac
         done;;
-    optimize|unoptimize|autostart) appops menu "$1";;
+    optimize|unoptimize|autostart) [ "$PHONE_VERIFIED" = 1 ] || cleanup --verify || exit 1; appops menu "$1";;
     battery)     cleanup --battery;;
     permissions) cleanup --permissions;;
     cleanup)     cleanup;;

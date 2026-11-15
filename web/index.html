@@ -340,7 +340,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.11</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.12</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -1747,7 +1747,8 @@ let storageView = "apps", fileCat = 0, STORAGE = null, FILES = null, storageSel 
 
 async function renderStorage() {
   await loadApps({ keepSide: true });
-  STORAGE = parseDiskstats(await sh("dumpsys diskstats"));
+  // Android measures app sizes about once a day; this starts its measuring job now (harmless where the job is missing).
+  STORAGE = parseDiskstats(await sh("cmd jobscheduler run -f android 1145656139 >/dev/null 2>&1; sleep 3; dumpsys diskstats"));
   // Apps missing from Android's last storage check: at least their app size, read from their APK files.
   const measured = new Set(STORAGE.apps.map((x) => x.p));
   const missing = APPS.filter((a) => (a.tier < 4 || a.optimized || a.off) && !measured.has(a.p)).map((a) => a.p);
@@ -1822,7 +1823,10 @@ function storageRows() {
   const s = $("#storageSearch").value.trim().toLowerCase();
   if (storageView === "apps") {
     const known = new Map(APPS.map((a) => [a.p, a]));
-    return STORAGE.apps.map((x) => ({ ...x, a: known.get(x.p) || { p: x.p, name: nameOf(x.p), tier: 4, icon: "" }, size: x.app + x.data + x.cache }))
+    // Removed or uninstalled apps can linger in Android's last measurement: they are not listed.
+    // (A removed preinstalled app keeps only its factory file, in the system image, which is not your storage.)
+    return STORAGE.apps.filter((x) => known.has(x.p) && !known.get(x.p).removed)
+      .map((x) => ({ ...x, a: known.get(x.p), size: x.app + x.data + x.cache }))
       .filter((x) => !s || x.a.name.toLowerCase().includes(s) || x.p.includes(s))
       .sort((a, b) => b.size - a.size);
   }
@@ -2004,21 +2008,26 @@ function lockField() {
   pw.style.cssText = "width:100%;margin-top:8px";
   return pw;
 }
-// Every delete, reset, uninstall, clear-data and restore asks for the screen lock.
-// Enter submits; a right code closes the dialog, a wrong one opens it again with the reason.
+// The screen lock is asked once, right after connecting. After that a destructive action only asks "are you sure".
 async function confirmWithLock(title, text, okLabel) {
+  return await modal(title, text, [["Cancel", ""], [okLabel, "ok", "primary"]]) === "ok";
+}
+// Asked once per connection. Enter submits; a wrong code opens the question again with the reason.
+// Resolves to false when cancelled. A phone that cannot check its lock over USB is let in with a note.
+async function askLockOnce() {
   let error = "";
   for (;;) {
     const box = el("div"), pw = lockField(), err = el("p", "small");
     err.style.color = "var(--red)"; err.textContent = error;
-    box.append(el("label", "small muted", "Type the phone's PIN, password or pattern to confirm. Leave it empty if the phone has no screen lock."), pw, err);
+    box.append(pw, err);
     pw.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); pw.closest("dialog").querySelector(".actions .primary").click(); } };
     setTimeout(() => pw.focus(), 50);
-    if (await modal(title, text, [["Cancel", ""], [okLabel, "ok", "primary"]], box) !== "ok") return false;
+    if (await modal("Unlock", "Type the phone's PIN, password or pattern once to use this tool. Leave it empty if the phone has no screen lock.",
+      [["Cancel", ""], ["Unlock", "ok", "primary"]], box) !== "ok") return false;
     const code = pw.value; pw.value = "";
     error = await checkLock(code);
     if (!error) return true;
-    if (error.startsWith("This phone does not")) { await modal("Cannot check the screen lock", error, [["OK", "ok", "primary"]]); return false; }
+    if (error.startsWith("This phone does not")) { log("This phone cannot check its screen lock over USB, so it was not asked."); return true; }
   }
 }
 
@@ -2119,26 +2128,11 @@ const CLEAN = [
   ["Tools", null], ["Close apps & free RAM", "ram"], ["Flush free space", "trim"], ["Install apps", "installtab"], ["App names & icons", "names"],
 ];
 let cleanChoice = "Contacts", settingsCat = "Wi-Fi";
-// Storage and Cleanup show nothing until the screen lock is typed; leaving the tab locks it again.
+// (Storage and Cleanup used to have their own lock; the screen lock is now asked once, when connecting.)
 let gateOpen = null;
-function lockGate(name, title, text) {
-  if (gateOpen === name) { $(`#${name}Gate`).replaceChildren(); $(`#${name}Body`).classList.remove("hidden"); return true; }
-  $(`#${name}Body`).classList.add("hidden");
-  const card = el("div", "card connect"), pw = lockField(), err = el("p", "small"), go = el("button", "btn primary big", "Unlock");
-  err.style.color = "var(--red)";
-  card.append(el("h1", "", title), el("p", "muted", text + " Leave it empty if the phone has no screen lock."), pw, err, go);
-  go.onclick = () => runButton(go, async () => {
-    const code = pw.value; pw.value = "";
-    err.textContent = await checkLock(code);
-    if (err.textContent) return false;
-    gateOpen = name;
-    lockGate(name);
-    queue(TAB_LOAD[name]).catch(showError);
-  });
-  pw.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); go.click(); } };
-  $(`#${name}Gate`).replaceChildren(card);
-  setTimeout(() => pw.focus(), 50);
-  return false;
+function lockGate(name) {
+  $(`#${name}Body`).classList.remove("hidden");   // the screen lock was already asked when connecting
+  return true;
 }
 function renderCleanup() {
   $("#cleanNav").replaceChildren(...CLEAN.map(([title, kind]) => {
@@ -2815,6 +2809,9 @@ async function connect(known) {
     return;
   }
   adb = new Adb(transport);
+  // the one screen lock check: nothing is shown or changed before it
+  $("#phoneName").textContent = "Waiting for the screen lock...";
+  if (!await askLockOnce()) { const a = adb; adb = null; $("#phoneName").textContent = "Not connected"; await a.close().catch(() => {}); return; }
   serial = device.serial;
   storeDevice = null;   // another phone may need other app versions
   transport.disconnected.then(() => { if (adb) { adb = null; appsLoaded = false; gateOpen = null; namesRun++; setConnected(""); toast("Phone disconnected."); } });

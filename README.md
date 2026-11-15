@@ -8,7 +8,7 @@ ADB-based battery optimizer and cleanup tool for Android. Runs from Linux, Windo
 
 - **MAX BATTERY**: power saving, dark mode, deep sleep, battery settings, app restrictions and background data blocking in one step. `RESTORE` undoes it.
 - **Extra savers** (optional, never applied by MAX BATTERY): 5G off, diagnostics apps off, lower screen resolution, 85% charge limit on Samsung.
-- **Uninstall anything**: every package, Google services and system parts included, marked unsafe and behind a double confirmation (screen lock, then typing REMOVE). Without root a preinstalled app is removed for your user with its data; its file stays in the read-only system image.
+- **Uninstall anything**: every package, Google services and system parts included, marked unsafe and behind a double confirmation (confirm, then typing REMOVE). Without root a preinstalled app is removed for your user with its data; its file stays in the read-only system image.
 - **Bloatware**: remove preinstalled apps (Netflix, Meta services, ...) for your user; they can be brought back.
 - **Sleep now**: screen off and straight into deep sleep.
 - **Awake right now**: which apps hold the processor awake, plus screen-on time and heat state.
@@ -23,7 +23,7 @@ ADB-based battery optimizer and cleanup tool for Android. Runs from Linux, Windo
 - **Install**: drag in `.apk` files or split bundles (`.apks`, `.xapk`, `.apkm`, with OBB data); shows name, icon and version first, installs over USB.
 - **F-Droid store** (web app Install tab and script): search open-source apps, download the version that fits the phone, verify its SHA-256, install over USB. The web app reads a daily copy of F-Droid's list (`web/fdroid.json`, refreshed by a workflow) and picks the downloaded APK up from the Downloads folder.
 - **Cleanup**: contacts, calendar, call log, SMS, saved Wi-Fi networks, settings reset, keyboard learned words, screen lock removal, free RAM, TRIM.
-- Storage and Cleanup only open after the phone's screen lock is typed, and every delete, reset, uninstall, clear-data and restore asks for it again. The phone checks it; the field shows dots.
+- The phone's screen lock is asked once, when connecting (the phone checks it; the field shows dots). Destructive actions then ask for a plain confirmation; unsafe removals also ask you to type REMOVE.
 
 ## Setup: USB debugging
 
