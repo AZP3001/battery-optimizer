@@ -1091,27 +1091,6 @@ def lock_menu():
         print("Wrong entries count as failed unlock attempts, so stop and check before trying again.")
 
 
-# --- screen lock check ---
-
-def verify_lock(why):
-    """Ask for the phone's screen lock (hidden) and let the phone check it. True when it is right.
-    The phone's answer can repeat the code, so it is never printed."""
-    while True:
-        try:
-            code = getpass.getpass(f"{why} Screen lock (hidden; a pattern as digits 1-9; just Enter if the phone has none; Ctrl-C cancels): ")
-        except (EOFError, KeyboardInterrupt):
-            print("\nCancelled.")
-            return False
-        _, out, err = adb(f"locksettings verify --old {shlex.quote(code)}" if code else "locksettings verify")
-        if re.search("verified successfully", out + err, re.I):
-            return True
-        if re.search(r"unknown command|usage:", out + err, re.I) and not re.search("didn't match|wrong", out + err, re.I):
-            print("This phone cannot check its screen lock over USB, so it is not asked.")
-            return True
-        print("Too many wrong tries: the phone makes you wait. Try again later." if re.search("throttl|try again", out + err, re.I)
-              else "Wrong screen lock. Wrong tries count as failed unlock attempts on the phone.")
-
-
 # --- disable apps and services ---
 
 # Set of package names from 'pm list packages' output.
@@ -3099,10 +3078,6 @@ def main():
         if not shutil.which(tool):
             sys.exit(f"{tool} is not installed.")
     require_phone()
-    if os.environ.get("PHONE_VERIFIED") != "1" and not verify_lock("One check before anything is shown or changed."):
-        sys.exit(1)
-    if sys.argv[1:] == ["--verify"]:
-        return
     try:
         if sys.argv[1:] == ["--battery"]:
             battery_menu()
@@ -3129,8 +3104,6 @@ return $rc
 case "$1" in
     "")
         # One entry point: every phone tool is a row in this menu and opens its own menu.
-        cleanup --verify || exit 1   # the screen lock, once; the tools below then skip it
-        export PHONE_VERIFIED=1
         while choice=$(printf '%s\n' \
             "Battery        maximum battery life: apps, settings, deep sleep, mobile data" \
             "Optimize       stop apps running in the background" \
@@ -3152,7 +3125,7 @@ case "$1" in
                 Help*)        phonehelp | less;;
             esac
         done;;
-    optimize|unoptimize|autostart) [ "$PHONE_VERIFIED" = 1 ] || cleanup --verify || exit 1; appops menu "$1";;
+    optimize|unoptimize|autostart) appops menu "$1";;
     battery)     cleanup --battery;;
     permissions) cleanup --permissions;;
     cleanup)     cleanup;;

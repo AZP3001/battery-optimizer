@@ -340,7 +340,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.12</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.13</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -1989,46 +1989,9 @@ async function deleteFiles(btn, rows) {
   });
 }
 
-// ---------- screen lock check: every delete, reset, uninstall and clear-data asks for it ----------
-// The phone checks the code itself ("locksettings verify"), so a wrong code changes nothing. The field shows dots.
-// The phone checks the code itself ("locksettings verify"). Resolves to "" when right, else the reason.
-// The answer can repeat the typed code, so it is never logged.
-async function checkLock(code) {
-  // Not queued: the Unlock button already runs inside the queue, and a nested queue would wait forever.
-  const out = await sh(code ? `locksettings verify --old ${q(code)}` : "locksettings verify");
-  if (/verified successfully/i.test(out)) return "";
-  if (/unknown command|usage:/i.test(out) && !/didn't match|wrong/i.test(out)) return "This phone does not let USB debugging check the screen lock, so this is blocked here. Use the script instead.";
-  return /throttl|try again|timeout/i.test(out) ? "Too many wrong tries: the phone makes you wait. Try again later."
-    : "Wrong screen lock. Wrong tries count as failed unlock attempts on the phone.";
-}
-function lockField() {
-  const pw = el("input", "search");
-  pw.type = "password"; pw.autocomplete = "off"; pw.spellcheck = false;
-  pw.placeholder = "Screen lock (a pattern as digits 1-9)";
-  pw.style.cssText = "width:100%;margin-top:8px";
-  return pw;
-}
-// The screen lock is asked once, right after connecting. After that a destructive action only asks "are you sure".
+// Destructive actions ask a plain "are you sure"; the phone itself already asked to allow this computer.
 async function confirmWithLock(title, text, okLabel) {
   return await modal(title, text, [["Cancel", ""], [okLabel, "ok", "primary"]]) === "ok";
-}
-// Asked once per connection. Enter submits; a wrong code opens the question again with the reason.
-// Resolves to false when cancelled. A phone that cannot check its lock over USB is let in with a note.
-async function askLockOnce() {
-  let error = "";
-  for (;;) {
-    const box = el("div"), pw = lockField(), err = el("p", "small");
-    err.style.color = "var(--red)"; err.textContent = error;
-    box.append(pw, err);
-    pw.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); pw.closest("dialog").querySelector(".actions .primary").click(); } };
-    setTimeout(() => pw.focus(), 50);
-    if (await modal("Unlock", "Type the phone's PIN, password or pattern once to use this tool. Leave it empty if the phone has no screen lock.",
-      [["Cancel", ""], ["Unlock", "ok", "primary"]], box) !== "ok") return false;
-    const code = pw.value; pw.value = "";
-    error = await checkLock(code);
-    if (!error) return true;
-    if (error.startsWith("This phone does not")) { log("This phone cannot check its screen lock over USB, so it was not asked."); return true; }
-  }
 }
 
 // ---------- contacts, calendar, call log, SMS (port of the script) ----------
@@ -2605,8 +2568,8 @@ async function restoreBackups(btn, files) {
 
 // ---------- F-Droid in the Install tab ----------
 // Search runs on fdroid.json, a daily copy of F-Droid's app list kept next to this page (f-droid.org itself may not be
-// read by web pages). The browser downloads the APK normally; the page picks it up from the Downloads folder (allowed
-// once), checks it against F-Droid's SHA-256 and installs it over USB. The Play Store app is not used.
+// read by web pages). The phone downloads the APK itself, checks F-Droid's SHA-256, installs it and deletes the file.
+// Nothing is saved on the computer. The Play Store app is not used.
 const FDROID_REPO = "https://f-droid.org/repo";
 let STORE = null, storeDevice = null;
 async function loadStore() {
@@ -2645,47 +2608,42 @@ function renderStore() {
   }));
 }
 
-// The Downloads folder, allowed once and remembered by the browser.
-async function downloadsFolder() {
-  let dir = await cache.get("__downloads_folder");
-  if (dir && (await dir.queryPermission({ mode: "read" })) !== "granted" && (await dir.requestPermission({ mode: "read" })) !== "granted") dir = null;
-  if (dir) return dir;
-  if (await modal("Allow your Downloads folder", "The browser downloads the app into your Downloads folder. Choose that folder once so this page can pick the file up from there and install it. It only reads .apk files it is waiting for.",
-    [["Cancel", ""], ["Choose Downloads folder", "ok", "primary"]]) !== "ok") return null;
-  try { dir = await window.showDirectoryPicker({ id: "downloads", startIn: "downloads", mode: "read" }); } catch { return null; }
-  await cache.set("__downloads_folder", dir);
-  return dir;
+// Official F-Droid mirrors that serve plain HTTP. Web pages may not read f-droid.org (no CORS), and Android's shell has
+// no HTTPS client, so the phone fetches over HTTP with its built-in nc. Safe because the SHA-256 comes from F-Droid's
+// signed index (fdroid.json) and is checked on the phone before installing.
+const FDROID_HTTP = ["mirrors.dotsrc.org/fdroid/repo", "ftp.lysator.liu.se/pub/fdroid/repo", "mirror.init7.net/fdroid/repo",
+  "ftp.gwdg.de/pub/android/fdroid/repo", "plug-mirror.rcac.purdue.edu/fdroid/repo", "mirror.fcix.net/fdroid/repo"];
+// Phone shell script: try each mirror until the file has the right checksum. Prints OK when it is ready at `apk`.
+function storeFetchScript(path, hash, size, apk) {
+  const tries = FDROID_HTTP.map((m) => {
+    const host = m.split("/")[0], url = m.slice(host.length) + path;
+    return `[ "$ok" ] || { printf 'GET ${url} HTTP/1.1\\r\\nHost: ${host}\\r\\nConnection: close\\r\\nUser-Agent: battery-optimizer\\r\\n\\r\\n' | nc -q 900 ${host} 80 > ${apk}.raw 2>/dev/null; ` +
+      `head -c 16 ${apk}.raw | grep -q ' 200' && tail -c ${size} ${apk}.raw > ${apk} && [ "$(sha256sum ${apk} | cut -d' ' -f1)" = ${hash} ] && ok=1; }`;
+  });
+  return `rm -f ${apk} ${apk}.raw; ok=; ${tries.join("; ")}; rm -f ${apk}.raw; [ "$ok" ] && echo OK`;
 }
-const sha256 = async (blob) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()))].map((b) => b.toString(16).padStart(2, "0")).join("");
 
 async function storeInstall(btn, pkg, name, v) {
-  if (!window.showDirectoryPicker) { await modal("Not supported", "Installing from F-Droid needs Chrome or Edge on a computer.", [["OK", "ok", "primary"]]); return; }
-  const dir = await downloadsFolder();
-  if (!dir) return;
-  const [versionName, , , , , apk, hash, size] = v;
-  const base = apk.split("/").pop().replace(/\.apk$/i, "");
-  // Start the normal browser download (the browser may ask to keep an .apk file). A hidden frame, not a link:
-  // if the browser shows the response instead of downloading it, only the frame changes, never this page.
-  const frame = el("iframe"); frame.hidden = true; frame.src = FDROID_REPO + apk; document.body.append(frame);
-  setTimeout(() => frame.remove(), 10 * 60 * 1000);
+  const [versionName, , , , , path, hash, size] = v;
+  const apk = "/data/local/tmp/battery-optimizer-fdroid.apk";
   await runButton(btn, async (set) => {
-    const started = Date.now();
-    let file = null;
-    // Wait for the finished download: same name (the browser may add " (1)"), right size, right checksum.
-    while (!file) {
-      if (Date.now() - started > 10 * 60 * 1000) throw new Error("the download did not show up in the chosen folder within 10 minutes");
-      set(`Downloading ${name}... (keep the file if the browser asks)`);
-      for await (const entry of dir.values()) {
-        if (entry.kind !== "file" || !entry.name.startsWith(base) || !entry.name.endsWith(".apk")) continue;
-        const f = await entry.getFile();
-        if (f.size !== size) continue;
-        set("Checking the download...");
-        if (await sha256(f) === hash) { file = f; break; }
-      }
-      if (!file) await new Promise((r) => setTimeout(r, 1500));
-    }
-    await installItem({ parts: [{ name: "base.apk", blob: file }], obbs: [] }, set);
-    log(`Installed ${name} ${versionName} from F-Droid (checksum verified)`);
+    // the list goes into a phone shell command, so only plain file names and hex checksums pass
+    if (!/^[0-9a-f]{64}$/.test(hash) || !/^\/[\w.\-]+\.apk$/.test(path)) throw new Error("bad entry in the F-Droid list");
+    set(`Downloading ${name}...`);
+    // The phone reports how far the download is while it runs.
+    const timer = setInterval(async () => {
+      const n = parseInt(await sh(`stat -c %s ${apk}.raw 2>/dev/null`).catch(() => ""), 10);
+      if (n > 0) set(`Downloading ${name} ${Math.min(100, Math.round(n * 100 / size))}%`);
+    }, 1000);
+    let out;
+    try { out = await sh(storeFetchScript(path, hash, size, apk)); } finally { clearInterval(timer); }
+    try {
+      if (!out.includes("OK")) throw new Error("the phone could not download it (no internet on the phone, or every mirror failed). Try again later.");
+      set("Installing...");
+      const r = await sh(`pm install -r ${apk}`);
+      if (!r.includes("Success")) throw new Error(firstError(r));
+    } finally { await sh(`rm -f ${apk} ${apk}.raw`); }
+    log(`Installed ${name} ${versionName} from F-Droid (checksum verified, download deleted)`);
     await loadApps({ keepSide: true });
     // Only this row changes, so the button keeps its "Done".
     btn.dataset.label = "Update";
@@ -2795,7 +2753,7 @@ async function connect(known) {
     await modal("Could not open the phone", `${e.message}\n\nAnother program is using it. Close other ADB programs (run "adb kill-server"), unplug and replug the phone, reload this page and try again.`, [["OK", "ok", "primary"]]);
     return;
   }
-  $("#phoneName").textContent = "Tap Allow on the phone...";
+  $("#phoneName").textContent = "Tap Allow on the phone (tick \"Always allow\")...";
   let transport;
   try {
     transport = await AdbDaemonTransport.authenticate({ serial: device.serial, connection,
@@ -2809,9 +2767,6 @@ async function connect(known) {
     return;
   }
   adb = new Adb(transport);
-  // the one screen lock check: nothing is shown or changed before it
-  $("#phoneName").textContent = "Waiting for the screen lock...";
-  if (!await askLockOnce()) { const a = adb; adb = null; $("#phoneName").textContent = "Not connected"; await a.close().catch(() => {}); return; }
   serial = device.serial;
   storeDevice = null;   // another phone may need other app versions
   transport.disconnected.then(() => { if (adb) { adb = null; appsLoaded = false; gateOpen = null; namesRun++; setConnected(""); toast("Phone disconnected."); } });

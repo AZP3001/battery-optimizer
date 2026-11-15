@@ -69,7 +69,10 @@ rem On Windows fzf runs its key bindings with cmd.exe unless told to use bash.
 set "FZF_DEFAULT_OPTS=--with-shell 'bash -c'"
 if not defined TERM set "TERM=cygwin"
 "%TOOLS%\git\bin\bash.exe" "%SCRIPT%" %*
-exit /b %errorlevel%
+set "RC=%errorlevel%"
+rem Stop the background adb server, otherwise it keeps the phone busy and the website gets extra "Allow USB debugging" prompts.
+adb kill-server >nul 2>&1
+exit /b %RC%
 
 :oldwindows
 echo This needs Windows 10 (version 1803) or newer.
