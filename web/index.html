@@ -340,7 +340,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.13</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.14</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -2020,9 +2020,26 @@ function contentLabel(row, fields) {
 }
 async function loadContent(name) {
   const [uri, projection, fields, , live] = CONTENT[name];
-  const out = await sh(`content query --uri ${uri} --projection ${projection}${live ? ` --where ${q(live)}` : ""}`);
-  if (!out.includes("Row:") && !out.includes("No result found")) throw new Error(firstError(out));
+  const query = `content query --uri ${uri} --projection ${projection}${live ? ` --where ${q(live)}` : ""}`;
+  let out = await sh(query);
+  if (/Error while accessing provider|Could not find provider|Unknown URI/i.test(out) && await reviveProvider(uri)) out = await sh(query);
+  if (!out.includes("Row:") && !out.includes("No result found")) throw new Error(out.trim().split("\n").slice(0, 3).join(" ").slice(0, 300) || "no answer from the phone");
   return parseRows(out).filter((r) => r._id).map((r) => { const [label, ...rest] = contentLabel(r, fields); return { id: r._id, label: label || "(no name)", sub: rest.join(" · ") }; });
+}
+// Android's storage for contacts/call log, calendar and SMS is a system part. If it was removed or disabled
+// (for example by a bulk uninstall), reading fails; offer to bring it back. True when it was brought back.
+const PROVIDER_PKG = { "com.android.contacts": "com.android.providers.contacts", "call_log": "com.android.providers.contacts",
+  "com.android.calendar": "com.android.providers.calendar", "sms": "com.android.providers.telephony" };
+async function reviveProvider(uri) {
+  const pkg = PROVIDER_PKG[uri.split("/")[2]];
+  if (!pkg) return false;
+  const state = await sh(`pm list packages ${pkg} | grep -qx package:${pkg} || echo GONE; pm list packages -d ${pkg} | grep -qx package:${pkg} && echo OFF`);
+  if (!/GONE|OFF/.test(state)) return false;
+  if (await modal("Android's storage for this is off", `${pkg} is ${state.includes("GONE") ? "removed" : "disabled"} on this phone, so this data cannot be read (and apps like Phone or Contacts break). Bring it back?`,
+    [["Cancel", ""], ["Bring back", "ok", "primary"]]) !== "ok") return false;
+  await sh(`cmd package install-existing ${pkg}; pm enable --user 0 ${pkg}`);
+  log(`Brought back ${pkg}`);
+  return true;
 }
 // Delete rows whose id matches condition, such as "=5" or " IN (5,6)".
 async function deleteRows(uri, condition) {
