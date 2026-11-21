@@ -387,7 +387,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.17</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.18</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -2874,7 +2874,7 @@ Object.assign(ACTIONS, {
 
 // ---------- debug menu (click the title): share battery-related phone info, no personal data ----------
 // Paste the Google Apps Script web app URL here (see backend/telemetry.gs). Empty = only "Download" works.
-const TELEMETRY_URL = "";
+const TELEMETRY_URL = "https://script.google.com/macros/s/AKfycbzn7RyJcedQQJHIf9dojtzd_Hnsr2XZOCEo_LACHwnCS3wBdS8-aCoC_cGi6eefn9Ev/exec";
 // Only battery-relevant, non-personal values: no names, accounts, numbers, serials, Wi-Fi names, files or messages.
 async function collectTelemetry() {
   const props = ["ro.product.manufacturer", "ro.product.brand", "ro.product.model", "ro.product.device", "ro.build.version.release",
