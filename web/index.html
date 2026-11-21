@@ -232,7 +232,7 @@
 <body>
 <header>
   <div class="bar">
-    <div class="brand">
+    <div class="brand" id="brand" title="Debug menu" style="cursor:pointer">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="18" height="10" rx="2"/><path d="M22 11v2"/><path d="M6 10v4M10 10v4"/></svg>
       Battery Optimizer
       <button class="design" id="designToggle" title="Green: classic design. Red: experimental glass design." aria-label="Switch design"><i></i><i></i></button>
@@ -387,7 +387,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.16</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.17</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -2870,6 +2870,61 @@ Object.assign(ACTIONS, {
   tunerMax: () => { document.querySelectorAll("#tuner input[data-k]").forEach((cb) => (cb.checked = cb.dataset.k !== "adjust_brightness_disabled")); $("#tunerLoc").value = "2"; $("#tunerBright").value = 50; $("#tunerTrig").value = 30; toast("Strongest settings picked. Press Apply."); },
   tunerReset: (b) => runButton(b, async () => { await sh("settings delete global battery_saver_constants; settings put global low_power_trigger_level 0"); await renderTuner(); }, $("#res-tuner")),
 });
+
+
+// ---------- debug menu (click the title): share battery-related phone info, no personal data ----------
+// Paste the Google Apps Script web app URL here (see backend/telemetry.gs). Empty = only "Download" works.
+const TELEMETRY_URL = "";
+// Only battery-relevant, non-personal values: no names, accounts, numbers, serials, Wi-Fi names, files or messages.
+async function collectTelemetry() {
+  const props = ["ro.product.manufacturer", "ro.product.brand", "ro.product.model", "ro.product.device", "ro.build.version.release",
+    "ro.build.version.sdk", "ro.build.version.security_patch", "ro.build.display.id", "ro.product.cpu.abilist", "ro.soc.model", "ro.build.version.oneui", "ro.miui.ui.version.name"];
+  const p = (await sh(props.map((k) => `echo "${k}=$(getprop ${k})"`).join("; "))).trim().split("\n");
+  const settingKeys = [...new Set([...BATTERY_SETTINGS.map(([ns, k]) => `${ns}/${k}`), "global/battery_saver_constants", "global/low_power",
+    "global/low_power_sticky", "global/low_power_trigger_level", "global/low_power_sticky_auto_disable_enabled", "system/screen_off_timeout",
+    "system/screen_brightness_mode", "system/peak_refresh_rate", "system/min_refresh_rate", "secure/ui_night_mode", "global/airplane_mode_on"])];
+  const sv = (await sh(settingKeys.map((k) => `echo "${k}=$(settings get ${k.replace("/", " ")})"`).join("; "))).trim().split("\n");
+  const doze = (await sh(Object.keys(DOZE_CONSTANTS).map((k) => `echo "${k}=$(device_config get device_idle ${k})"`).join("; "))).trim().split("\n");
+  const kv = (lines) => Object.fromEntries(lines.filter((l) => l.includes("=")).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
+  const batt = parseBattery(await sh("dumpsys battery"));
+  const [size, density, modes, thermal, wakes] = await Promise.all([sh("wm size"), sh("wm density"), sh("dumpsys display | grep -i supportedModes | head -3"),
+    sh("dumpsys thermalservice | grep -m1 'Thermal Status'"), sh("dumpsys power | grep -c PARTIAL_WAKE_LOCK")]);
+  if (!appsLoaded) await loadApps();
+  return {
+    format: 1, created: new Date().toISOString(), tool: document.body.textContent.match(/Version [\d.]+/)?.[0] || "",
+    device: kv(p), settings: kv(sv), doze: kv(doze),
+    battery: { level: batt.level, temp: batt.temp, health: batt.health ?? null },
+    display: { size: size.trim(), density: density.trim(), modes: modes.trim().slice(0, 2000) },
+    thermal: thermal.trim(), wake_locks: parseInt(wakes, 10) || 0,
+    // package names only (public store IDs) and how the tool treats them
+    apps: APPS.map((a) => ({ p: a.p, tier: a.tier, removed: a.removed, off: a.off, boot: a.boot, optimized: a.optimized, bg_off: a.bgOff, data_off: a.dataOff })),
+  };
+}
+async function debugMenu() {
+  const choice = await modal("Debug", "Help improve the tool by sharing how this phone is set up. Nothing personal is included.",
+    [["Close", ""], ["Download as file", "dl"], ["Save telemetry", "share", "primary"]]);
+  if (!choice) return;
+  if (!adb) { toast("Connect a phone first."); return; }
+  if (choice === "share" && await modal("Share phone info?", "This sends battery-related info about this phone to the developer, only to improve this tool:\n\n" +
+    "• phone model, Android version, processor type\n• battery level, temperature, health\n• screen resolution, refresh rates\n• battery, power saving and deep sleep settings\n• installed app package names and how they are optimized\n\n" +
+    "Not sent: your name, accounts, phone number, serial number, contacts, messages, photos, files, Wi-Fi names or location.",
+    [["Cancel", ""], ["Share", "ok", "primary"]]) !== "ok") return;
+  if (choice === "share" && !TELEMETRY_URL) { await modal("Not set up yet", "Uploading is not set up yet. Use \"Download as file\" and send the file instead.", [["OK", "ok", "primary"]]); return; }
+  toast("Collecting phone info...");
+  const data = JSON.stringify(await queue(collectTelemetry), null, 1);
+  if (choice === "dl") {
+    const a = el("a"); a.href = URL.createObjectURL(new Blob([data], { type: "application/json" }));
+    a.download = `battery-optimizer-telemetry-${Date.now()}.json`; document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000); return;
+  }
+  toast("Uploading...");
+  // text/plain keeps it a simple request, which Apps Script accepts from any page
+  const r = await fetch(TELEMETRY_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: data });
+  const t = await r.text();
+  if (!r.ok || !t.startsWith("ok")) throw new Error("upload failed, the server answered: " + t.slice(0, 200));
+  log("Telemetry shared."); toast("Shared. Thank you!");
+}
+$("#brand").onclick = (e) => { if (!e.target.closest("#designToggle")) debugMenu().catch(showError); };
 
 // ---------- design switch (classic / experimental glass), remembered in this browser ----------
 try { document.body.classList.toggle("glass", localStorage.getItem("design") === "glass"); } catch {}
