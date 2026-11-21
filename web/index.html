@@ -257,6 +257,11 @@
       <div class="card"><h2>Top battery users</h2><p class="muted small">Apps that used the most battery since the last full charge.</p>
         <div id="useList" class="muted small">Press Show.</div>
         <div class="row" style="margin-top:12px"><button class="btn" data-act="use">Show</button><button class="btn hidden" id="useSelect" title="Selects the ones not on your keep list, so you can restrict them">Select in Apps tab</button><button class="btn" data-act="useReset" title="Forget the numbers so far and start counting again">New measurement</button></div></div>
+      <div class="card" style="grid-column:1/-1"><h2>Power saving mode tuner</h2>
+        <p class="muted small">Choose exactly what Android's power saving mode does (the same setting Savertuner changes), and when it turns on and off. Applies on Apply; RESTORE undoes it.</p>
+        <div id="tuner" class="muted small">Loading...</div>
+        <div class="row" style="margin-top:12px"><button class="btn primary" data-act="tunerApply">Apply</button><button class="btn" data-act="tunerMax">Strongest</button><button class="btn" data-act="tunerReset">Android default</button></div>
+        <div class="result" id="res-tuner"></div></div>
       <div class="card"><h2>Sleep now</h2><p class="muted">Turns the screen off and puts the phone straight into deep sleep, without waiting for Android's timers. It ends when you wake the phone.</p>
         <button class="btn" data-act="sleepnow">Sleep now</button><div class="result" id="res-sleepnow"></div></div>
       <div class="card"><h2>Deep sleep</h2><p class="muted">The phone goes into deep sleep about 30 seconds after the screen turns off, instead of after many minutes.</p>
@@ -340,7 +345,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.14</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.15</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -2671,7 +2676,7 @@ async function storeInstall(btn, pkg, name, v) {
 
 // ---------- tabs and wiring ----------
 let tab = "apps";
-const TAB_LOAD = { apps: () => appsLoaded || loadApps(), battery: refreshStatus, settings: renderSettings,
+const TAB_LOAD = { apps: () => appsLoaded || loadApps(), battery: async () => { await refreshStatus(); await renderTuner(); }, settings: renderSettings,
   permissions: renderPermissions, radios: renderRadios, storage: async () => { if (lockGate("storage", "Storage is locked", "Type the phone's PIN, password or pattern to see apps and files.")) await renderStorage(); },
   install: async () => { renderInstall(); renderStore(); await loadStore(); renderStore(); },
   cleanup: () => { if (lockGate("cleanup", "Cleanup is locked", "Type the phone's PIN, password or pattern to see contacts, messages and the other data.")) renderCleanup(); } };
@@ -2756,6 +2761,68 @@ const ACTIONS = {
 
 };
 document.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => Promise.resolve(ACTIONS[b.dataset.act](b)).catch(showError)));
+
+
+// ---------- power saving mode tuner (what Savertuner does: battery_saver_constants + auto on/off) ----------
+// [key, label, value that saves battery]. "x_disabled=false" means feature x is ON while saving.
+const TUNER_FLAGS = [
+  ["force_all_apps_standby", "Put all background apps to sleep", "true"], ["force_background_check", "Stop background services", "true"],
+  ["quick_doze_enabled", "Deep sleep right after screen off", "true"], ["datasaver_disabled", "Data Saver on", "false"],
+  ["firewall_disabled", "Block network for sleeping apps", "false"], ["enable_night_mode", "Dark mode", "true"],
+  ["animation_disabled", "Animations off", "true"], ["vibration_disabled", "Vibration off", "true"],
+  ["aod_disabled", "Always-on display off", "true"], ["optional_sensors_disabled", "Optional sensors off", "true"],
+  ["launch_boost_disabled", "No CPU boost when opening apps", "true"], ["soundtrigger_disabled", "\"Hey Google\" listening off", "true"],
+  ["fullbackup_deferred", "Delay full backups", "true"], ["keyvaluebackup_deferred", "Delay app-setting backups", "true"],
+  ["adjust_brightness_disabled", "Keep brightness (don't dim)", "false"],
+];
+const TUNER_LOCATION = [["0", "Location unchanged"], ["1", "GPS off when screen off"], ["2", "All location off when screen off"], ["3", "Location only for the app on screen"], ["4", "Location throttled when screen off"]];
+let tuner = null;
+const parseConstants = (t) => Object.fromEntries((t === "null" ? "" : t).split(",").filter((x) => x.includes("=")).map((x) => x.split("=").map((y) => y.trim())));
+async function renderTuner() {
+  const [c, trig, off, offLvl] = (await sh("settings get global battery_saver_constants; settings get global low_power_trigger_level; settings get global low_power_sticky_auto_disable_enabled; settings get global low_power_sticky_auto_disable_level")).trim().split("\n");
+  tuner = { c: parseConstants((c || "").trim()), trig: parseInt(trig, 10) || 0, off: off?.trim() !== "0", offLvl: parseInt(offLvl, 10) || 90 };
+  const box = $("#tuner"); box.className = "";
+  const flags = el("div"); flags.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px";
+  for (const [k, label, good] of TUNER_FLAGS) {
+    const l = el("label", "small"), cb = el("input"); cb.type = "checkbox"; cb.dataset.k = k; cb.dataset.good = good;
+    cb.checked = (tuner.c[k] ?? "") === good; l.append(cb, " " + label); flags.append(l);
+  }
+  const num = (label, id, v, min, max) => { const l = el("label", "small"), i = el("input", "search"); i.type = "number"; i.id = id; i.min = min; i.max = max; i.value = v; i.style.cssText = "width:80px;max-width:80px;flex:none"; l.append(label + " ", i); return l; };
+  const loc = el("select", "search"); loc.id = "tunerLoc";
+  for (const [v, t] of TUNER_LOCATION) { const o = el("option", "", t); o.value = v; loc.append(o); }
+  loc.value = tuner.c.location_mode || "0"; loc.style.cssText = "width:auto;flex:none";
+  const offCb = el("input"); offCb.type = "checkbox"; offCb.id = "tunerOff"; offCb.checked = tuner.off;
+  const offL = el("label", "small"); offL.append(offCb, " Turn off again after charging");
+  const extra = el("div", "row"); extra.style.cssText = "gap:16px;flex-wrap:wrap;margin-top:10px";
+  extra.append(num("Brightness while saving (%)", "tunerBright", Math.round(parseFloat(tuner.c.adjust_brightness_factor || "0.5") * 100), 10, 100), loc,
+    num("Turn on at battery %", "tunerTrig", tuner.trig, 0, 99), offL, num("...when charged to %", "tunerOffLvl", tuner.offLvl, 50, 100));
+  box.replaceChildren(flags, extra);
+}
+function tunerCommands() {
+  const c = { ...tuner.c };
+  document.querySelectorAll("#tuner input[data-k]").forEach((cb) => { c[cb.dataset.k] = cb.checked ? cb.dataset.good : (cb.dataset.good === "true" ? "false" : "true"); });
+  const clamp = (id, lo, hi) => Math.min(hi, Math.max(lo, parseInt($(id).value, 10) || lo));
+  c.adjust_brightness_factor = (clamp("#tunerBright", 10, 100) / 100).toFixed(2);
+  c.location_mode = $("#tunerLoc").value;
+  return { "battery_saver_constants": Object.entries(c).map(([k, v]) => `${k}=${v}`).join(","),
+    "low_power_trigger_level": String(clamp("#tunerTrig", 0, 99)), "automatic_power_save_mode": clamp("#tunerTrig", 0, 99) ? "0" : null,
+    "low_power_sticky_auto_disable_enabled": $("#tunerOff").checked ? "1" : "0", "low_power_sticky_auto_disable_level": String(clamp("#tunerOffLvl", 50, 100)) };
+}
+async function applyTuner(values) {
+  const keys = Object.keys(values), old = (await sh(keys.map((k) => `settings get global ${k}`).join("; "))).split("\n");
+  const backup = loadBackup(); backup.settings ??= {};
+  keys.forEach((k, i) => { backup.settings[`global/${k}`] ??= (old[i] || "null").trim(); });
+  saveBackup(backup);
+  await sh(keys.map((k) => values[k] === null ? `settings delete global ${k}` : `settings put global ${k} ${q(values[k])}`).join("; "));
+  // power saving re-reads its policy when toggled; if it is on, nudge it so the new rules apply now
+  if (await powerSavingOn()) await sh(`${powerSaverCmd(false)}; ${powerSaverCmd(true)}`);
+  log("Power saving mode tuned: " + values.battery_saver_constants);
+}
+Object.assign(ACTIONS, {
+  tunerApply: (b) => runButton(b, async () => { await applyTuner(tunerCommands()); await renderTuner(); }, $("#res-tuner")),
+  tunerMax: () => { document.querySelectorAll("#tuner input[data-k]").forEach((cb) => (cb.checked = cb.dataset.k !== "adjust_brightness_disabled")); $("#tunerLoc").value = "2"; $("#tunerBright").value = 50; $("#tunerTrig").value = 30; toast("Strongest settings picked. Press Apply."); },
+  tunerReset: (b) => runButton(b, async () => { await sh("settings delete global battery_saver_constants; settings put global low_power_trigger_level 0"); await renderTuner(); }, $("#res-tuner")),
+});
 
 // ---------- connect ----------
 async function connect(known) {
