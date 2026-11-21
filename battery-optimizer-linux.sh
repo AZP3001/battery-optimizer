@@ -2128,6 +2128,10 @@ BATTERY_SETTINGS = [
     ("system", "lift_to_wake", "0", True, "Lift to wake: off"),
     ("system", "nearby_scanning_enabled", "0", True, "Nearby device scanning: off"),
     ("system", "edge_enable", "0", True, "Edge panels: off"),
+    ("system", "intelligent_sleep_mode", "0", True, "Smart stay (front camera checks if you look): off"),
+    ("system", "master_motion", "0", True, "Motions and gestures (Samsung): off"),
+    ("global", "sem_enhanced_cpu_responsiveness", "0", True, "Enhanced processing (Samsung): off"),
+    ("global", "sem_auto_wifi_control_enabled", "0", True, "Turn on Wi-Fi automatically near saved places (Samsung): off"),
 ]
 
 # Deep sleep (Doze) timers in ms. Android's defaults wait many minutes and want the phone to lie still.
