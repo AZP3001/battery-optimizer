@@ -2873,7 +2873,7 @@ Object.assign(ACTIONS, {
 
 
 // ---------- debug menu (click the title): share battery-related phone info, no personal data ----------
-// Paste the Google Apps Script web app URL here (see backend/telemetry.gs). Empty = only "Download" works.
+// Upload address of the telemetry receiver (a Google Apps Script web app). Empty = only "Download" works.
 const TELEMETRY_URL = "https://script.google.com/macros/s/AKfycbzn7RyJcedQQJHIf9dojtzd_Hnsr2XZOCEo_LACHwnCS3wBdS8-aCoC_cGi6eefn9Ev/exec";
 // Only battery-relevant, non-personal values: no names, accounts, numbers, serials, Wi-Fi names, files or messages.
 async function collectTelemetry() {
