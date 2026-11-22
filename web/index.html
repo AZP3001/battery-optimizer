@@ -387,7 +387,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.18</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.19</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -2890,38 +2890,67 @@ async function collectTelemetry() {
   const [size, density, modes, thermal, wakes] = await Promise.all([sh("wm size"), sh("wm density"), sh("dumpsys display | grep -i supportedModes | head -3"),
     sh("dumpsys thermalservice | grep -m1 'Thermal Status'"), sh("dumpsys power | grep -c PARTIAL_WAKE_LOCK")]);
   if (!appsLoaded) await loadApps();
+  const byUid = {}; for (const a of APPS) if (a.uid !== undefined) byUid[a.uid] ??= a.p;
+  const use = parsePowerUse(await sh("dumpsys batterystats --charged | grep -E '^ +U(ID|id) [u0-9a]+: [0-9.]+'"))
+    .slice(0, 25).map(([uid, mah]) => ({ p: byUid[uid] || (Number(uid) < 10000 ? "android-system" : "other"), mah: Math.round(mah * 10) / 10 }));
+  // only who holds a wake lock, never its tag: sync tags can contain account names
+  const awake = [...new Set(parseWakeLocks(await sh("dumpsys power | grep WAKE_LOCK")).map(([uid]) => byUid[uid] || "android-system"))];
   return {
     format: 1, created: new Date().toISOString(), tool: document.body.textContent.match(/Version [\d.]+/)?.[0] || "",
     device: kv(p), settings: kv(sv), doze: kv(doze),
     battery: { level: batt.level, temp: batt.temp, health: batt.health ?? null },
     display: { size: size.trim(), density: density.trim(), modes: modes.trim().slice(0, 2000) },
-    thermal: thermal.trim(), wake_locks: parseInt(wakes, 10) || 0,
+    thermal: thermal.trim(), wake_locks: parseInt(wakes, 10) || 0, keeping_awake: awake,
+    screen_on_since_charge: await screenOnTime() || null, power_use_mah: use,
     // package names only (public store IDs) and how the tool treats them
     apps: APPS.map((a) => ({ p: a.p, tier: a.tier, removed: a.removed, off: a.off, boot: a.boot, optimized: a.optimized, bg_off: a.bgOff, data_off: a.dataOff })),
   };
 }
-async function debugMenu() {
-  const choice = await modal("Debug", "Help improve the tool by sharing how this phone is set up. Nothing personal is included.",
-    [["Close", ""], ["Download as file", "dl"], ["Save telemetry", "share", "primary"]]);
-  if (!choice) return;
-  if (!adb) { toast("Connect a phone first."); return; }
-  if (choice === "share" && await modal("Share phone info?", "This sends battery-related info about this phone to the developer, only to improve this tool:\n\n" +
-    "• phone model, Android version, processor type\n• battery level, temperature, health\n• screen resolution, refresh rates\n• battery, power saving and deep sleep settings\n• installed app package names and how they are optimized\n\n" +
-    "Not sent: your name, accounts, phone number, serial number, contacts, messages, photos, files, Wi-Fi names or location.",
-    [["Cancel", ""], ["Share", "ok", "primary"]]) !== "ok") return;
-  if (choice === "share" && !TELEMETRY_URL) { await modal("Not set up yet", "Uploading is not set up yet. Use \"Download as file\" and send the file instead.", [["OK", "ok", "primary"]]); return; }
-  toast("Collecting phone info...");
+const CONSENT_TEXT = "Share battery-related info about this phone with the developer, only to improve this tool? It is sent automatically, at most once a day per phone:\n\n" +
+  "• phone model, Android version, processor type\n• battery level, temperature, health, screen-on time\n• screen resolution, refresh rates\n• battery, power saving and deep sleep settings\n" +
+  "• installed app package names, how they are optimized, and which use the most battery\n\n" +
+  "Never sent: your name, accounts, phone number, serial number, contacts, messages, photos, files, Wi-Fi names or location.\n\nYou can change this any time: click \"Battery Optimizer\" at the top left.";
+const consent = () => { try { return localStorage.getItem("telemetry_consent"); } catch { return null; } };
+const setConsent = (v) => { try { localStorage.setItem("telemetry_consent", v); } catch {} };
+async function uploadTelemetry() {
   const data = JSON.stringify(await queue(collectTelemetry), null, 1);
+  const r = await fetch(TELEMETRY_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: data });   // text/plain: a simple request Apps Script accepts
+  const t = await r.text();
+  if (!r.ok || !t.startsWith("ok")) throw new Error("upload failed, the server answered: " + t.slice(0, 200));
+  try { localStorage.setItem("telemetry_last_" + serial, String(Date.now())); } catch {}
+}
+// After connecting: ask once per browser; if allowed, upload quietly at most once a day per phone.
+async function autoTelemetry() {
+  if (!TELEMETRY_URL) return;
+  if (consent() === null) setConsent(await modal("Help improve Battery Optimizer?", CONSENT_TEXT, [["No", ""], ["Yes, share", "ok", "primary"]]) === "ok" ? "yes" : "no");
+  if (consent() !== "yes") return;
+  let last = 0; try { last = Number(localStorage.getItem("telemetry_last_" + serial)) || 0; } catch {}
+  if (Date.now() - last < 24 * 3600 * 1000) return;
+  await uploadTelemetry();
+  log("Shared this phone's battery info with the developer (you allowed it; change it by clicking the title).");
+}
+async function debugMenu() {
+  const on = consent() === "yes";
+  const choice = await modal("Debug", `Automatic sharing is ${on ? "ON" : "OFF"}. Nothing personal is included.`,
+    [["Close", ""], [on ? "Turn sharing off" : "Turn sharing on", "toggle"], ["Download as file", "dl"], ["Share now", "share", "primary"]]);
+  if (!choice) return;
+  if (choice === "toggle") {
+    if (on) { setConsent("no"); toast("Sharing is off."); return; }
+    if (await modal("Turn sharing on?", CONSENT_TEXT, [["Cancel", ""], ["Yes, share", "ok", "primary"]]) !== "ok") return;
+    setConsent("yes"); toast("Sharing is on.");
+    if (adb) await autoTelemetry();
+    return;
+  }
+  if (!adb) { toast("Connect a phone first."); return; }
+  if (choice === "share" && !on && await modal("Share phone info?", CONSENT_TEXT.replace(" It is sent automatically, at most once a day per phone:", ":"), [["Cancel", ""], ["Share", "ok", "primary"]]) !== "ok") return;
+  toast("Collecting phone info...");
   if (choice === "dl") {
+    const data = JSON.stringify(await queue(collectTelemetry), null, 1);
     const a = el("a"); a.href = URL.createObjectURL(new Blob([data], { type: "application/json" }));
     a.download = `battery-optimizer-telemetry-${Date.now()}.json`; document.body.append(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000); return;
   }
-  toast("Uploading...");
-  // text/plain keeps it a simple request, which Apps Script accepts from any page
-  const r = await fetch(TELEMETRY_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: data });
-  const t = await r.text();
-  if (!r.ok || !t.startsWith("ok")) throw new Error("upload failed, the server answered: " + t.slice(0, 200));
+  await uploadTelemetry();
   log("Telemetry shared."); toast("Shared. Thank you!");
 }
 $("#brand").onclick = (e) => { if (!e.target.closest("#designToggle")) debugMenu().catch(showError); };
@@ -2971,6 +3000,7 @@ async function connect(known) {
   log("Connected phone: " + title);
   const level = parseBattery(await sh("dumpsys battery")).level;
   setConnected(title);
+  autoTelemetry().catch((e) => log("Sharing phone info failed: " + e.message));   // never blocks using the tool
   $("#phoneBatt").textContent = level === null ? "" : `· ${level}%`;
 }
 function setConnected(title) {
