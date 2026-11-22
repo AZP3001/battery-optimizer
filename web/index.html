@@ -247,7 +247,7 @@
       <button role="tab" data-tab="install">Install</button>
       <button role="tab" data-tab="cleanup">Cleanup</button>
     </nav>
-    <div class="phone"><span class="dot" id="dot"></span><span id="phoneName" class="muted">Not connected</span><span id="phoneBatt" class="muted"></span>
+    <div class="phone"><span class="dot" id="dot"></span><span id="phoneName" class="muted">Not connected</span><span id="phoneBatt" class="muted"></span><span id="shareStatus" class="muted small"></span>
       <button class="btn dup" id="connectBtn">Connect</button><button class="btn hidden" id="disconnectBtn">Disconnect</button></div>
   </div>
 </header>
@@ -387,7 +387,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.19</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.20</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -2876,19 +2876,34 @@ Object.assign(ACTIONS, {
 // Upload address of the telemetry receiver (a Google Apps Script web app). Empty = only "Download" works.
 const TELEMETRY_URL = "https://script.google.com/macros/s/AKfycbzn7RyJcedQQJHIf9dojtzd_Hnsr2XZOCEo_LACHwnCS3wBdS8-aCoC_cGi6eefn9Ev/exec";
 // Only battery-relevant, non-personal values: no names, accounts, numbers, serials, Wi-Fi names, files or messages.
-async function collectTelemetry() {
+async function collectTelemetry(step = () => {}) {
+  step(5);
   const props = ["ro.product.manufacturer", "ro.product.brand", "ro.product.model", "ro.product.device", "ro.build.version.release",
-    "ro.build.version.sdk", "ro.build.version.security_patch", "ro.build.display.id", "ro.product.cpu.abilist", "ro.soc.model", "ro.build.version.oneui", "ro.miui.ui.version.name"];
+    "ro.build.version.sdk", "ro.build.version.security_patch", "ro.build.display.id", "ro.product.cpu.abilist", "ro.soc.model", "ro.build.version.oneui", "ro.miui.ui.version.name",
+    "ro.board.platform", "ro.hardware", "ro.product.first_api_level", "ro.vendor.build.version.release", "ro.build.type"];
   const p = (await sh(props.map((k) => `echo "${k}=$(getprop ${k})"`).join("; "))).trim().split("\n");
   const settingKeys = [...new Set([...BATTERY_SETTINGS.map(([ns, k]) => `${ns}/${k}`), "global/battery_saver_constants", "global/low_power",
     "global/low_power_sticky", "global/low_power_trigger_level", "global/low_power_sticky_auto_disable_enabled", "system/screen_off_timeout",
-    "system/screen_brightness_mode", "system/peak_refresh_rate", "system/min_refresh_rate", "secure/ui_night_mode", "global/airplane_mode_on"])];
+    "system/screen_brightness_mode", "system/peak_refresh_rate", "system/min_refresh_rate", "secure/ui_night_mode", "global/airplane_mode_on",
+    "global/wifi_on", "global/bluetooth_on", "global/mobile_data", "secure/location_mode", "global/zen_mode", "system/screen_brightness",
+    "secure/doze_always_on", "global/data_roaming", "global/preferred_network_mode"])];
   const sv = (await sh(settingKeys.map((k) => `echo "${k}=$(settings get ${k.replace("/", " ")})"`).join("; "))).trim().split("\n");
   const doze = (await sh(Object.keys(DOZE_CONSTANTS).map((k) => `echo "${k}=$(device_config get device_idle ${k})"`).join("; "))).trim().split("\n");
   const kv = (lines) => Object.fromEntries(lines.filter((l) => l.includes("=")).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
   const batt = parseBattery(await sh("dumpsys battery"));
   const [size, density, modes, thermal, wakes] = await Promise.all([sh("wm size"), sh("wm density"), sh("dumpsys display | grep -i supportedModes | head -3"),
     sh("dumpsys thermalservice | grep -m1 'Thermal Status'"), sh("dumpsys power | grep -c PARTIAL_WAKE_LOCK")]);
+  step(25);
+  // battery history since the last full charge: discharge, radio time, what wakes the phone (hardware names, not personal)
+  const stats = await sh("dumpsys batterystats --charged | grep -E 'Time on battery|Total run time|Discharge|discharge:|Screen on:|Screen doze|Mobile radio active|Wifi on:|Wifi running|Phone signal levels|Interactive:|Device idle mode|Device light idling|Connectivity changes|Camera on|Flashlight|Sensor|Wakeup reason|Kernel Wake lock' | head -120");
+  step(45);
+  const sys = await sh("cat /sys/class/power_supply/battery/cycle_count /sys/class/power_supply/battery/charge_full /sys/class/power_supply/battery/charge_full_design 2>/dev/null | tr '\n' ' '; echo; " +
+    `for c in /sys/devices/system/cpu/cpu*/cpufreq; do echo "$(cat $c/scaling_governor 2>/dev/null) $(cat $c/cpuinfo_max_freq 2>/dev/null)"; done | sort | uniq -c | tr '\\n' ';'; echo; ` +
+    "grep -E 'MemTotal|SwapTotal' /proc/meminfo | tr -s ' ' | tr '\n' ';'; echo; dumpsys activity services | grep -c ServiceRecord; dumpsys jobscheduler | grep -c 'JOB #'");
+  const [cycles, cpu, mem, services, jobs] = sys.split("\n");
+  step(60);
+  const [buckets, whitelist, features] = await Promise.all([sh("am get-standby-bucket 2>/dev/null"), sh("dumpsys deviceidle whitelist"), sh("pm list features")]);
+  step(75);
   if (!appsLoaded) await loadApps();
   const byUid = {}; for (const a of APPS) if (a.uid !== undefined) byUid[a.uid] ??= a.p;
   const use = parsePowerUse(await sh("dumpsys batterystats --charged | grep -E '^ +U(ID|id) [u0-9a]+: [0-9.]+'"))
@@ -2902,6 +2917,13 @@ async function collectTelemetry() {
     display: { size: size.trim(), density: density.trim(), modes: modes.trim().slice(0, 2000) },
     thermal: thermal.trim(), wake_locks: parseInt(wakes, 10) || 0, keeping_awake: awake,
     screen_on_since_charge: await screenOnTime() || null, power_use_mah: use,
+    battery_history: stats.trim().split("\n").map((l) => l.trim()).filter(Boolean),
+    battery_sysfs: (cycles || "").trim(), cpu: (cpu || "").trim(), memory: (mem || "").trim(),
+    running_services: parseInt(services, 10) || 0, scheduled_jobs: parseInt(jobs, 10) || 0,
+    standby_buckets: buckets.trim().slice(0, 20000),
+    // apps allowed to ignore battery optimization ("system,pkg,uid" lines)
+    battery_whitelist: whitelist.trim().split("\n").map((l) => l.split(",").slice(0, 2).join(",")).filter(Boolean),
+    features: features.split("\n").map((l) => l.replace("feature:", "").trim()).filter(Boolean),
     // package names only (public store IDs) and how the tool treats them
     apps: APPS.map((a) => ({ p: a.p, tier: a.tier, removed: a.removed, off: a.off, boot: a.boot, optimized: a.optimized, bg_off: a.bgOff, data_off: a.dataOff })),
   };
@@ -2912,11 +2934,18 @@ const CONSENT_TEXT = "Share battery-related info about this phone with the devel
   "Never sent: your name, accounts, phone number, serial number, contacts, messages, photos, files, Wi-Fi names or location.\n\nYou can change this any time: click \"Battery Optimizer\" at the top left.";
 const consent = () => { try { return localStorage.getItem("telemetry_consent"); } catch { return null; } };
 const setConsent = (v) => { try { localStorage.setItem("telemetry_consent", v); } catch {} };
+const shareStatus = (t) => { $("#shareStatus").textContent = t ? "· " + t : ""; };
 async function uploadTelemetry() {
-  const data = JSON.stringify(await queue(collectTelemetry), null, 1);
-  const r = await fetch(TELEMETRY_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: data });   // text/plain: a simple request Apps Script accepts
+  let data;
+  try {
+    data = JSON.stringify(await queue(() => collectTelemetry((pc) => shareStatus(`Collecting for sharing ${pc}%`))));
+    // fetch cannot report upload progress without a CORS preflight, which Apps Script does not answer; the file is small anyway
+    shareStatus(`Uploading ${fmtBytes(data.length)}...`);
+  } catch (e) { shareStatus(""); throw e; }
+  const r = await fetch(TELEMETRY_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: data }).catch((e) => { shareStatus("sharing failed"); throw e; });   // text/plain: a simple request Apps Script accepts
   const t = await r.text();
-  if (!r.ok || !t.startsWith("ok")) throw new Error("upload failed, the server answered: " + t.slice(0, 200));
+  if (!r.ok || !t.startsWith("ok")) { shareStatus("sharing failed"); throw new Error("upload failed, the server answered: " + t.slice(0, 200)); }
+  shareStatus(`Shared ✓ (${fmtBytes(data.length)})`); setTimeout(() => shareStatus(""), 8000);
   try { localStorage.setItem("telemetry_last_" + serial, String(Date.now())); } catch {}
 }
 // After connecting: ask once per browser; if allowed, upload quietly at most once a day per phone.
