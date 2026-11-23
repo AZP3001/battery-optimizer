@@ -294,6 +294,9 @@
         <div class="row"><button class="btn primary big" data-act="max">Start MAX BATTERY</button><span class="muted" id="keepInfo"></span></div>
         <div class="result" id="res-max"></div>
       </div>
+      <div class="card"><h2 style="display:flex;align-items:center;justify-content:space-between">Keep list <button class="btn" id="keepAdd" title="Add apps" aria-label="Add apps to the keep list">+</button></h2>
+        <p class="muted small">These apps are never restricted by MAX BATTERY: messages, alarms, banking.</p>
+        <div id="keepList" class="muted small">Loading...</div></div>
       <div class="card"><h2>Status</h2><p class="muted small">What is applied right now.</p><ul class="status" id="statusList"><li class="muted">Loading...</li></ul>
         <div class="row" style="margin-top:12px"><button class="btn" data-act="status">Refresh</button></div></div>
       <div class="card"><h2>Top battery users</h2><p class="muted small">Apps that used the most battery since the last full charge.</p>
@@ -387,7 +390,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.23</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.24</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -1032,16 +1035,27 @@ function currentKeep() { return loadKeep() ?? new Set([...SUGGESTED_KEEP].filter
 const sortApps = () => APPS.sort((a, b) => a.tier - b.tier || a.name.localeCompare(b.name));
 
 // keepSide: leave the selection panel as it is (so its Apply button can show "Done").
+// Really disabled = state 2 (disabled) or 3 (disabled by user). "pm list packages -d" also lists apps that are only
+// asleep until first use (4) or shipped switched off by their maker (0), which look normal to the user.
+// Input: "P <package>" / "E <state>" lines (sed over "dumpsys package packages", user 0).
+function disabledFromDump(text) {
+  const off = new Set(); let pkg = null;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("P ")) pkg = line.slice(2).trim();
+    else if (line.startsWith("E ") && pkg) { if (/^[23]$/.test(line.slice(2).trim())) off.add(pkg); pkg = null; }
+  }
+  return off;
+}
 async function loadApps({ keepSide = false } = {}) {
   const old = Object.fromEntries(APPS.map((a) => [a.p, a]));
   // Every list in one shell call (each call over USB costs a round trip), split on a marker line.
-  const out = (await sh(["pm list packages", "pm list packages -3", "pm list packages -s", "pm list packages -d",
+  const out = (await sh(["pm list packages", "pm list packages -3", "pm list packages -s", `dumpsys package packages | sed -nE 's/^  Package \\[([^]]+)\\].*/P \\1/p; s/^ +User 0:.* enabled=([0-9]).*/E \\1/p'`,
     ...OPTIMIZE_OPS.map((op) => `cmd appops query-op ${op} ignore`),
     "for a in BOOT_COMPLETED LOCKED_BOOT_COMPLETED; do cmd package query-receivers --brief -a android.intent.action.$a --include-stopped-packages; done",
     "pm list packages -U", "cmd netpolicy list restrict-background-blacklist", "pm list packages -u"].join("; echo @@SECTION@@; "))).split("@@SECTION@@\n");
   if (out.length !== 11) throw new Error("could not read the app list");
   const [allOut, userOut, sysOut, offOut, ...rest] = out;
-  const all = [...packageNames(allOut)], sys = packageNames(sysOut), off = packageNames(offOut);
+  const all = [...packageNames(allOut)], sys = packageNames(sysOut), off = disabledFromDump(offOut);
   // installed by the user: "-3", plus every package that is not a system package (some phones leave apps out of "-3")
   const user = new Set([...packageNames(userOut), ...all.filter((p) => !sys.has(p))]);
   const ignored = Object.fromEntries(OPTIMIZE_OPS.map((op, i) => [op, new Set(rest[i].split("\n").map((l) => l.trim()).filter(validPkg))]));
@@ -1519,9 +1533,47 @@ async function renderPermissions() {
 }
 
 // ---------- battery tab ----------
+function renderKeepList() {
+  const box = $("#keepList");
+  if (!appsLoaded) return;
+  const k = [...currentKeep()].map((p) => APPS.find((a) => a.p === p) || { p, name: p, icon: "" }).sort((a, b) => a.name.localeCompare(b.name));
+  if (!k.length) { box.replaceChildren(el("p", "", "Empty. Press + to add apps.")); return; }
+  box.className = "";
+  box.replaceChildren(...k.map((a) => {
+    const row = el("div", "userow"), bin = el("button", "btn", "🗑");
+    bin.title = bin.ariaLabel = `Remove ${a.name} from the keep list`;
+    bin.onclick = () => { const s = currentKeep(); s.delete(a.p); saveKeep(s); renderKeepInfo(); };
+    const info = el("div", "info"); info.append(el("div", "name", a.name), el("div", "pkg", a.p));
+    row.append(iconEl(a, 28), info, bin); row.style.cssText = "display:flex;align-items:center;gap:10px;padding:4px 0";
+    return row;
+  }));
+}
+async function pickKeepApps() {
+  if (!appsLoaded) await queue(loadApps);
+  const box = el("div"), search = el("input", "search"), list = el("div");
+  search.placeholder = "Search apps"; search.style.width = "100%";
+  list.style.cssText = "max-height:50vh;overflow:auto;margin-top:8px";
+  const draw = () => {
+    const k = currentKeep(), q = search.value.trim().toLowerCase();
+    const apps = APPS.filter((a) => !a.removed && a.tier < 4 && !k.has(a.p) && (!q || a.name.toLowerCase().includes(q) || a.p.includes(q)))
+      .sort((a, b) => a.tier - b.tier || a.name.localeCompare(b.name)).slice(0, 80);
+    list.replaceChildren(...(apps.length ? apps.map((a) => {
+      const row = el("button", "app"), info = el("div", "info");
+      row.style.cssText = "width:100%;text-align:left;background:none;border:0;color:inherit";
+      info.append(el("div", "name", a.name), el("div", "pkg", a.p));
+      row.append(iconEl(a, 28), info, el("span", "badge green", "+ Add"));
+      row.onclick = () => { const s = currentKeep(); s.add(a.p); saveKeep(s); renderKeepInfo(); draw(); };
+      return row;
+    }) : [el("div", "empty", "Nothing to add.")]));
+  };
+  search.oninput = draw; draw(); box.append(search, list);
+  setTimeout(() => search.focus(), 50);
+  await modal("Add to keep list", "Click apps to add them.", [["Done", "ok", "primary"]], box);
+}
 function renderKeepInfo() {
+  renderKeepList();
   const k = loadKeep();
-  $("#keepInfo").textContent = k ? `${k.size} app${k.size === 1 ? "" : "s"} on your keep list. Edit it in the Apps tab.` : "No keep list yet. You'll be asked to check it first.";
+  $("#keepInfo").textContent = k ? `${k.size} app${k.size === 1 ? "" : "s"} on your keep list (see the Keep list card).` : "No keep list yet. You'll be asked to check it first.";
 }
 // The keep list, asking first when there is none yet. Resolves to null when the user wants to edit it first.
 async function ensureKeep() {
@@ -2729,7 +2781,7 @@ async function storeInstall(btn, pkg, name, v) {
 
 // ---------- tabs and wiring ----------
 let tab = "apps";
-const TAB_LOAD = { apps: () => appsLoaded || loadApps(), battery: async () => { await refreshStatus(); await renderTuner(); }, settings: renderSettings,
+const TAB_LOAD = { apps: () => appsLoaded || loadApps(), battery: async () => { await refreshStatus(); await renderTuner(); if (!appsLoaded) await loadApps(); renderKeepList(); }, settings: renderSettings,
   permissions: renderPermissions, radios: renderRadios, storage: async () => { if (lockGate("storage", "Storage is locked", "Type the phone's PIN, password or pattern to see apps and files.")) await renderStorage(); },
   install: async () => { renderInstall(); renderStore(); await loadStore(); renderStore(); },
   cleanup: () => { if (lockGate("cleanup", "Cleanup is locked", "Type the phone's PIN, password or pattern to see contacts, messages and the other data.")) renderCleanup(); } };
@@ -3002,6 +3054,7 @@ $("#brand").onclick = (e) => { if (!e.target.closest("#designToggle")) debugMenu
 
 // ---------- design switch (classic / experimental glass), remembered in this browser ----------
 try { document.body.classList.toggle("glass", localStorage.getItem("design") === "glass"); } catch {}
+$("#keepAdd").onclick = () => pickKeepApps().catch(showError);
 $("#designToggle").onclick = () => {
   const on = document.body.classList.toggle("glass");
   try { localStorage.setItem("design", on ? "glass" : "classic"); } catch {}

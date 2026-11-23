@@ -1098,9 +1098,27 @@ def package_names(text):
     return {line[8:] for line in text.splitlines() if line.startswith("package:")}
 
 
+# Really disabled = state 2 (disabled) or 3 (disabled by user). "pm list packages -d" also lists apps that are only
+# asleep until first use (4) or shipped switched off by their maker (0), which look normal to the user.
+DUMP_ENABLED = r"dumpsys package packages | sed -nE 's/^  Package \[([^]]+)\].*/P \1/p; s/^ +User 0:.* enabled=([0-9]).*/E \1/p'"
+
+
+def disabled_from_dump(text):
+    """Set of packages in state 2 or 3, from 'P <package>' / 'E <state>' lines (DUMP_ENABLED output)."""
+    off, pkg = set(), None
+    for line in text.splitlines():
+        if line.startswith("P "):
+            pkg = line[2:].strip()
+        elif line.startswith("E ") and pkg:
+            if line[2:].strip() in ("2", "3"):
+                off.add(pkg)
+            pkg = None
+    return off
+
+
 def disabled_packages():
     """Packages that are off: disabled, or removed for this user but still on the phone."""
-    off = package_names(adb("pm list packages -d")[1])
+    off = disabled_from_dump(adb(DUMP_ENABLED)[1])
     return off | (package_names(adb("pm list packages -u")[1]) - package_names(adb("pm list packages")[1]))
 
 
@@ -2871,6 +2889,7 @@ def fake_resources():
 
 # Tests the text parsers without a phone.
 def self_check():
+    assert disabled_from_dump("P a\nE 3\nP b\nE 4\nP c\nE 0\nP d\nE 1\nP e\nE 2\nP a\n") == {"a", "e"}
     states = "=com.a\nPOST_NOTIFICATION: ignore; time=+1s\n=com.b\nNo operations.\n=com.c\nPOST_NOTIFICATION: allow\n"
     assert parse_notifications_off(states) == {"com.a"}
     assert parse_available_mb("MemTotal: 9 kB\nMemAvailable:    2048 kB\n") == 2
