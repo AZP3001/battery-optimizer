@@ -2085,6 +2085,8 @@ BATTERY_SETTINGS = [
     ("global", "wifi_networks_available_notification_on", "0", False, "Open Wi-Fi network alerts: off"),
     ("global", "cached_apps_freezer", "enabled", False, "Freeze apps in the background (after a restart)"),
     ("global", "adaptive_battery_management_enabled", "1", False, "Adaptive battery: on"),
+    ("global", "app_standby_enabled", "1", True, "App standby (Android limits apps you do not use): on"),
+    ("global", "wifi_suspend_optimizations_enabled", "1", True, "Wi-Fi power saving while the phone sleeps: on"),
     ("global", "low_power_sticky", "1", False, "Power saving stays on after a restart"),
     ("global", "low_power_sticky_auto_disable_enabled", "0", False, "Power saving comes back after charging"),
     ("global", "app_auto_restriction_enabled", "1", False, "Android restricts battery-draining apps by itself: on"),
@@ -2133,6 +2135,7 @@ BATTERY_SETTINGS = [
     ("system", "intelligent_sleep_mode", "0", True, "Smart stay (front camera checks if you look): off"),
     ("system", "master_motion", "0", True, "Motions and gestures (Samsung): off"),
     ("global", "sem_enhanced_cpu_responsiveness", "0", True, "Enhanced processing (Samsung): off"),
+    ("global", "restricted_device_performance", "1,1", True, "Performance limit (Samsung, its default): on, so the chip stays in its efficient range"),
     ("global", "sem_auto_wifi_control_enabled", "0", True, "Turn on Wi-Fi automatically near saved places (Samsung): off"),
 ]
 
@@ -2564,7 +2567,7 @@ def extras_menu(backup):
             rows.append(f"      Screen resolution: {now} (pick one of the resolutions the phone offers)")
             acts.append("res")
         if charge in ("0", "1"):
-            rows.append(f"[{'ON ' if charge == '1' else 'OFF'}] Limit charging to 85% (Samsung): longer battery lifespan, less runtime per charge")
+            rows.append(f"[{'ON ' if charge == '1' else 'OFF'}] Limit charging (Samsung): stops at 85%, or 80% on One UI 6.1 and newer. Longer battery lifespan, less runtime per charge")
             acts.append("charge")
         if not rows:
             print("This phone offers none of the extra savers over USB.")

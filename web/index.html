@@ -387,7 +387,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.21</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.22</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -451,6 +451,8 @@ const BATTERY_SETTINGS = [
   ["global", "wifi_networks_available_notification_on", "0", false, "Open Wi-Fi network alerts: off"],
   ["global", "cached_apps_freezer", "enabled", false, "Freeze apps in the background (after a restart)"],
   ["global", "adaptive_battery_management_enabled", "1", false, "Adaptive battery: on"],
+  ["global", "app_standby_enabled", "1", true, "App standby (Android limits apps you do not use): on"],
+  ["global", "wifi_suspend_optimizations_enabled", "1", true, "Wi-Fi power saving while the phone sleeps: on"],
   ["global", "low_power_sticky", "1", false, "Power saving stays on after a restart"],
   ["global", "low_power_sticky_auto_disable_enabled", "0", false, "Power saving comes back after charging"],
   ["global", "app_auto_restriction_enabled", "1", false, "Android restricts battery-draining apps by itself: on"],
@@ -499,6 +501,7 @@ const BATTERY_SETTINGS = [
   ["system", "intelligent_sleep_mode", "0", true, "Smart stay (front camera checks if you look): off"],
   ["system", "master_motion", "0", true, "Motions and gestures (Samsung): off"],
   ["global", "sem_enhanced_cpu_responsiveness", "0", true, "Enhanced processing (Samsung): off"],
+  ["global", "restricted_device_performance", "1,1", true, "Performance limit (Samsung, its default): on, so the chip stays in its efficient range"],
   ["global", "sem_auto_wifi_control_enabled", "0", true, "Turn on Wi-Fi automatically near saved places (Samsung): off"],
 ];
 // Deep sleep (Doze) timers in ms.
@@ -1681,7 +1684,7 @@ async function renderSettings() {
   }
   const charge = (await sh("settings get global protect_battery")).trim();
   if (charge === "0" || charge === "1")
-    addSetting(["global", "protect_battery", "1", true, "Limit charging to 85% (Samsung): longer battery lifespan, less runtime per charge"], charge);
+    addSetting(["global", "protect_battery", "1", true, "Limit charging (Samsung): stops at 85%, or 80% on One UI 6.1 and newer. Longer battery lifespan, less runtime per charge"], charge);
   const disp = parseDisplay(await sh("wm size; wm density"));
   const sizes = disp ? displaySizes(disp, await sh("dumpsys display | grep -i supportedModes")) : [];
   if (sizes.length > 1) {
