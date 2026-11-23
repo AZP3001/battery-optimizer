@@ -390,7 +390,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.25</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.26</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -445,7 +445,12 @@ const SAVER_CONSTANTS = ["force_all_apps_standby=true", "force_background_check=
   "enable_quick_doze=true", "quick_doze_enabled=true", "disable_optional_sensors=true", "optional_sensors_disabled=true",
   "disable_aod=true", "aod_disabled=true", "disable_vibration=true", "vibration_disabled=true", "disable_launch_boost=true", "launch_boost_disabled=true",
   "disable_soundtrigger=true", "soundtrigger_disabled=true", "defer_full_backup=true", "fullbackup_deferred=true",
-  "defer_keyvalue_backup=true", "keyvaluebackup_deferred=true"].join(",");
+  "defer_keyvalue_backup=true", "keyvaluebackup_deferred=true", "soundtrigger_mode=1"].join(",");
+// The power saving rules are merged into what the phone already has (makers like Google tune their own, e.g.
+// location_mode), so our rules win and theirs stay. Other settings are plain values.
+const kvPairs = (t) => (t && t !== "null" ? t.split(",") : []).filter((x) => x.includes("=")).map((x) => [x.slice(0, x.indexOf("=")).trim(), x.slice(x.indexOf("=") + 1).trim()]);
+const targetValue = (key, value, cur) => key === "battery_saver_constants" ? Object.entries({ ...Object.fromEntries(kvPairs(cur)), ...Object.fromEntries(kvPairs(value)) }).map(([k, v]) => `${k}=${v}`).join(",") : value;
+const isApplied = (key, value, cur) => key === "battery_saver_constants" ? (() => { const c = Object.fromEntries(kvPairs(cur)); return kvPairs(value).every(([k, v]) => c[k] === v); })() : cur === value;
 // [namespace, key, value, Samsung-only (set only if the phone already has it), what it is]
 const BATTERY_SETTINGS = [
   ["global", "mobile_data_always_on", "0", false, "Mobile data stays on while on Wi-Fi: off"],
@@ -596,7 +601,7 @@ function displaySizes(disp, modes) {
 }
 const sizeName = (w) => ({ 720: "HD+", 1080: "FHD+", 1440: "WQHD+" }[w] || "");
 // Preinstalled apps most people never asked for (only apps you did not install yourself count).
-const BLOAT = /^com\.(netflix|facebook|linkedin|spotify|zhiliaoapp|ss\.android\.ugc|booking|amazon\.|king\.|microsoft\.(skydrive|appmanager|office)|hiya|opera|snapchat|dti\.|aura\.|ironsource|digitalturbine|samsung\.android\.aircommandmanager|samsung\.android\.game\.gos|samsung\.android\.(smartsuggestions|livestickers|aremojieditor)|samsung\.android\.(game\.gamehome|bixby|arzone|aremoji|stickercenter|kidsinstaller|app\.spage|tvplus)|sec\.android\.app\.(samsungapps|kidshome)|nothing\.(experience|userguide)|miui\.(analytics|msa|videoplayer|player|yellowpage|cloudbackup|cloudservice|micloudsync|bugreport|miservice|daemon|android\.fashiongallery|cleaner)|xiaomi\.(mipicks|joyose|payment|discover|glgm|ugd|barrage|micloud)|mi\.(globalbrowser|globalminusscreen)|samsung\.android\.(app\.tips|themestore|forest|scloud|mateagent|ardrawing|visionintelligence)|vodafone|google\.android\.(apps\.(youtube\.music|tachyon|subscriptions\.red|magazines|podcasts)|videos))/;
+const BLOAT = /^com\.(netflix|facebook|linkedin|spotify|zhiliaoapp|ss\.android\.ugc|booking|amazon\.|king\.|microsoft\.(skydrive|appmanager|office)|hiya|opera|snapchat|dti\.|aura\.|ironsource|digitalturbine|android\.DeviceAsWebcam|samsung\.android\.aircommandmanager|samsung\.android\.game\.gos|samsung\.android\.(smartsuggestions|livestickers|aremojieditor)|samsung\.android\.(game\.gamehome|bixby|arzone|aremoji|stickercenter|kidsinstaller|app\.spage|tvplus)|sec\.android\.app\.(samsungapps|kidshome)|nothing\.(experience|userguide)|miui\.(analytics|msa|videoplayer|player|yellowpage|cloudbackup|cloudservice|micloudsync|bugreport|miservice|daemon|android\.fashiongallery|cleaner)|xiaomi\.(mipicks|joyose|payment|discover|glgm|ugd|barrage|micloud)|mi\.(globalbrowser|globalminusscreen)|samsung\.android\.(app\.tips|themestore|forest|scloud|mateagent|ardrawing|visionintelligence)|vodafone|google\.android\.(apps\.(youtube\.music|tachyon|subscriptions\.red|magazines|podcasts)|videos))/;
 
 // Android refuses to switch power saving while the phone charges, and over USB it always charges.
 // So the charger is hidden from Android for a moment ("unplug" is only pretend, "reset" undoes it).
@@ -658,9 +663,9 @@ async function applySettings(backup) {
   for (const [ns, key, value, samsung, what] of BATTERY_SETTINGS) {
     const old = now[`${ns}/${key}`] ?? "null";
     if (samsung && old === "null") missing.push(what);
-    else if (old !== value) {
+    else if (!isApplied(key, value, old)) {
       backup.settings ??= {}; backup.settings[`${ns}/${key}`] ??= old;
-      commands.push(`settings put ${ns} ${key} ${q(value)}`);
+      commands.push(`settings put ${ns} ${key} ${q(targetValue(key, value, old))}`);
     }
   }
   const night = await nightMode();
@@ -669,7 +674,7 @@ async function applySettings(backup) {
   saveBackup(backup);  // saved before changing anything, so RESTORE works even if this stops halfway
   await runAll(commands);
   const after = await readSettings();
-  const failed = BATTERY_SETTINGS.filter(([ns, key, value, , what]) => !missing.includes(what) && after[`${ns}/${key}`] !== value).map((s) => s[4]);
+  const failed = BATTERY_SETTINGS.filter(([ns, key, value, , what]) => !missing.includes(what) && !isApplied(key, value, after[`${ns}/${key}`] ?? "null")).map((s) => s[4]);
   log(`  Settings: ${BATTERY_SETTINGS.length - missing.length - failed.length} set, dark mode and power saving on.`);
   failed.forEach((w) => log("  FAILED: " + w));
   if (missing.length) log("  Not on this phone (skipped): " + missing.join(", "));
@@ -1641,7 +1646,7 @@ async function refreshStatus() {
   } else add(false, "No keep list yet");
   const s = await readSettings();
   const set = BATTERY_SETTINGS.filter(([ns, key, , samsung]) => !(samsung && (s[`${ns}/${key}`] ?? "null") === "null"));
-  const good = set.filter(([ns, key, value]) => s[`${ns}/${key}`] === value).length;
+  const good = set.filter(([ns, key, value]) => isApplied(key, value, s[`${ns}/${key}`] ?? "null")).length;
   add(good === set.length, `Battery settings: ${good} of ${set.length}`);
   ul.replaceChildren(...items.map(([ok, text]) => { const li = el("li"); li.append(el("span", ok ? "ok" : "no", ok ? "✓" : "○"), el("span", "", text)); return li; }));
 }
@@ -1695,12 +1700,12 @@ async function renderSettings() {
     const name = `${ns}/${key}`;
     if (samsung && cur === "null") return;   // not on this phone
     const old = backup.settings?.[name];
-    add(name, what, `${name} = ${cur.length > 40 ? cur.slice(0, 40) + "..." : cur}`, cur === value, async (v) => {
+    add(name, what, `${name} = ${cur.length > 40 ? cur.slice(0, 40) + "..." : cur}`, isApplied(key, value, cur), async (v) => {
       const b = loadBackup(); b.settings ??= {};
-      if (v) { b.settings[name] ??= cur; saveBackup(b); return `settings put ${ns} ${key} ${q(value)}`; }
+      if (v) { b.settings[name] ??= cur; saveBackup(b); return `settings put ${ns} ${key} ${q(targetValue(key, value, cur))}`; }
       const prev = b.settings[name]; delete b.settings[name]; saveBackup(b);
       return prev === "null" || prev === undefined ? `settings delete ${ns} ${key}` : `settings put ${ns} ${key} ${q(prev)}`;
-    }, cur === value && old === undefined);
+    }, isApplied(key, value, cur) && old === undefined);
   };
   for (const s of BATTERY_SETTINGS) addSetting(s, now[`${s[0]}/${s[1]}`] ?? "null");
   const main = switches.length;   // "Switch all on" stops here
@@ -2900,7 +2905,8 @@ const TUNER_FLAGS = [
   ["defer_keyvalue_backup", "keyvaluebackup_deferred", false, "Delay app-setting backups"],
   ["enable_brightness_adjustment", "adjust_brightness_disabled", true, "Dim the screen"],
 ];
-const flagOn = (c, [k, old, inv]) => k in c ? c[k] === "true" : old in c ? (c[old] === "true") !== inv : false;
+const flagOn = (c, [k, old, inv]) => k === "disable_soundtrigger" && !(k in c) && "soundtrigger_mode" in c ? c.soundtrigger_mode !== "0"
+  : k in c ? c[k] === "true" : old in c ? (c[old] === "true") !== inv : false;
 const TUNER_LOCATION = [["0", "Location unchanged"], ["1", "GPS off when screen off"], ["2", "All location off when screen off"], ["3", "Location only for the app on screen"], ["4", "Location throttled when screen off"]];
 let tuner = null;
 const parseConstants = (t) => Object.fromEntries((t === "null" ? "" : t).split(",").filter((x) => x.includes("=")).map((x) => x.split("=").map((y) => y.trim())));
@@ -2927,6 +2933,7 @@ async function renderTuner() {
 function tunerCommands() {
   const c = { ...tuner.c };
   for (const [k, old, inv] of TUNER_FLAGS) { const on = $(`#tuner input[data-k="${k}"]`).checked; c[k] = String(on); c[old] = String(on !== inv); }
+  c.soundtrigger_mode = $('#tuner input[data-k="disable_soundtrigger"]').checked ? "1" : "0";   // newer Android: 1 = only critical
   const clamp = (id, lo, hi) => Math.min(hi, Math.max(lo, parseInt($(id).value, 10) || lo));
   c.adjust_brightness_factor = (clamp("#tunerBright", 10, 100) / 100).toFixed(2);
   c.location_mode = c.gps_mode = $("#tunerLoc").value;

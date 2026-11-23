@@ -2093,7 +2093,27 @@ SAVER_CONSTANTS = ",".join([
     "disable_aod=true", "aod_disabled=true", "disable_vibration=true", "vibration_disabled=true",
     "disable_launch_boost=true", "launch_boost_disabled=true", "disable_soundtrigger=true", "soundtrigger_disabled=true",
     "defer_full_backup=true", "fullbackup_deferred=true", "defer_keyvalue_backup=true", "keyvaluebackup_deferred=true",
+    "soundtrigger_mode=1",
 ])
+
+
+def kv_pairs(text):
+    return [tuple(x.split("=", 1)) for x in (text or "").split(",") if "=" in x and text != "null"]
+
+
+# The power saving rules are merged into what the phone already has (makers like Google tune their own, e.g.
+# location_mode), so our rules win and theirs stay. Other settings are plain values.
+def target_value(key, value, cur):
+    if key != "battery_saver_constants":
+        return value
+    return ",".join(f"{k}={v}" for k, v in {**dict(kv_pairs(cur)), **dict(kv_pairs(value))}.items())
+
+
+def is_applied(key, value, cur):
+    if key != "battery_saver_constants":
+        return cur == value
+    have = dict(kv_pairs(cur))
+    return all(have.get(k) == v for k, v in kv_pairs(value))
 
 # (namespace, key, value, Samsung-only: set only if the phone already has it, what it is)
 BATTERY_SETTINGS = [
@@ -2302,9 +2322,9 @@ def apply_settings(backup):
         old = now.get(f"{ns}/{key}", "null")
         if samsung and old == "null":
             missing.append(what)
-        elif old != value:
+        elif not is_applied(key, value, old):
             backup.setdefault("settings", {}).setdefault(f"{ns}/{key}", old)
-            commands.append(f"settings put {ns} {key} {shlex.quote(value)}")
+            commands.append(f"settings put {ns} {key} {shlex.quote(target_value(key, value, old))}")
     night = night_mode()
     if night and night != "yes":
         backup.setdefault("night_mode", night)
@@ -2316,7 +2336,7 @@ def apply_settings(backup):
     run_all(commands)
     after = read_settings()
     failed = [what for ns, key, value, samsung, what in BATTERY_SETTINGS
-              if what not in missing and after.get(f"{ns}/{key}") != value]
+              if what not in missing and not is_applied(key, value, after.get(f"{ns}/{key}", "null"))]
     print(f"  Settings: {len(BATTERY_SETTINGS) - len(missing) - len(failed)} set, dark mode and power saving on.")
     for what in failed:
         print(f"  FAILED: {what}")
@@ -2724,7 +2744,7 @@ def battery_status(keep):
         old = now.get(f"{ns}/{key}", "null")
         if samsung and old == "null":
             continue
-        print(f"[{'x' if old == value else ' '}] {what}")
+        print(f"[{'x' if is_applied(key, value, old) else ' '}] {what}")
     ask("\nPress Enter to go back.")
 
 
@@ -2889,6 +2909,9 @@ def fake_resources():
 
 # Tests the text parsers without a phone.
 def self_check():
+    merged = target_value("battery_saver_constants", SAVER_CONSTANTS, "location_mode=3,disable_vibration=false")
+    assert "location_mode=3" in merged and "disable_vibration=true" in merged and is_applied("battery_saver_constants", SAVER_CONSTANTS, merged)
+    assert not is_applied("battery_saver_constants", SAVER_CONSTANTS, "null") and target_value("x", "1", "0") == "1"
     assert disabled_from_dump("P a\nE 3\nP b\nE 4\nP c\nE 0\nP d\nE 1\nP e\nE 2\nP a\n") == {"a", "e"}
     states = "=com.a\nPOST_NOTIFICATION: ignore; time=+1s\n=com.b\nNo operations.\n=com.c\nPOST_NOTIFICATION: allow\n"
     assert parse_notifications_off(states) == {"com.a"}
