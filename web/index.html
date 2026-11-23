@@ -390,7 +390,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.24</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.25</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -2103,81 +2103,6 @@ async function confirmWithLock(title, text, okLabel) {
   return await modal(title, text, [["Cancel", ""], [okLabel, "ok", "primary"]]) === "ok";
 }
 
-// ---------- contacts, calendar, call log, SMS (port of the script) ----------
-const CONTACTS_URI = "content://com.android.contacts/contacts", SMS_URI = "content://sms";
-// [uri, projection, label fields, note, filter for rows that still exist]
-const CONTENT = {
-  "Contacts": [CONTACTS_URI, "_id:display_name", ["display_name"], "Synced contacts are also deleted from their account (Google, Samsung).", ""],
-  // Synced events stay as deleted=1 rows until the next sync, so those count as gone.
-  "Calendar": ["content://com.android.calendar/events", "_id:title:dtstart", ["title", "dtstart"], "Synced events are also deleted from their account.", "deleted=0"],
-  "Call log": ["content://call_log/calls", "_id:number:date", ["number", "date"], "", ""],
-  "SMS": [SMS_URI, "_id:address:date:body", ["address", "date", "body"], "RCS chats are not stored here.", ""],
-};
-function parseRows(text) {
-  const rows = [];
-  for (const line of text.split("\n")) {
-    const m = line.match(/^Row: \d+ (.*)/);
-    if (m) rows.push(Object.fromEntries([...m[1].matchAll(/(\w+)=(.*?)(?=, \w+=|$)/g)].map((x) => [x[1], x[2]])));
-  }
-  return rows;
-}
-function contentLabel(row, fields) {
-  return fields.map((f) => {
-    const v = row[f] ?? "";
-    return (f === "date" || f === "dtstart") && /^\d+$/.test(v) ? new Date(Number(v)).toLocaleString() : v;
-  }).filter(Boolean);
-}
-async function loadContent(name) {
-  const [uri, projection, fields, , live] = CONTENT[name];
-  const query = `content query --uri ${uri} --projection ${projection}${live ? ` --where ${q(live)}` : ""}`;
-  let out = await sh(query);
-  if (/Error while accessing provider|Could not find provider|Unknown URI/i.test(out) && await reviveProvider(uri)) out = await sh(query);
-  if (!out.includes("Row:") && !out.includes("No result found")) throw new Error(out.trim().split("\n").slice(0, 3).join(" ").slice(0, 300) || "no answer from the phone");
-  return parseRows(out).filter((r) => r._id).map((r) => { const [label, ...rest] = contentLabel(r, fields); return { id: r._id, label: label || "(no name)", sub: rest.join(" · ") }; });
-}
-// Android's storage for contacts/call log, calendar and SMS is a system part. If it was removed or disabled
-// (for example by a bulk uninstall), reading fails; offer to bring it back. True when it was brought back.
-const PROVIDER_PKG = { "com.android.contacts": "com.android.providers.contacts", "call_log": "com.android.providers.contacts",
-  "com.android.calendar": "com.android.providers.calendar", "sms": "com.android.providers.telephony" };
-async function reviveProvider(uri) {
-  const pkg = PROVIDER_PKG[uri.split("/")[2]];
-  if (!pkg) return false;
-  const state = await sh(`pm list packages ${pkg} | grep -qx package:${pkg} || echo GONE; pm list packages -d ${pkg} | grep -qx package:${pkg} && echo OFF`);
-  if (!/GONE|OFF/.test(state)) return false;
-  if (await modal("Android's storage for this is off", `${pkg} is ${state.includes("GONE") ? "removed" : "disabled"} on this phone, so this data cannot be read (and apps like Phone or Contacts break). Bring it back?`,
-    [["Cancel", ""], ["Bring back", "ok", "primary"]]) !== "ok") return false;
-  await sh(`cmd package install-existing ${pkg}; pm enable --user 0 ${pkg}`);
-  log(`Brought back ${pkg}`);
-  return true;
-}
-// Delete rows whose id matches condition, such as "=5" or " IN (5,6)".
-async function deleteRows(uri, condition) {
-  // The contacts table accepts deletes but ignores them, so its raw contacts are deleted instead.
-  const [target, key] = uri === CONTACTS_URI ? ["content://com.android.contacts/raw_contacts", "contact_id"] : [uri, "_id"];
-  const del = `content delete --uri ${target} --where ${q(key + condition)}`;
-  // Android silently ignores SMS writes from the shell unless this app-op is allowed for a moment.
-  await sh(uri === SMS_URI ? `appops set com.android.shell WRITE_SMS allow; ${del}; appops set com.android.shell WRITE_SMS default` : del);
-}
-// Delete in batches of 200, check what is left, retry leftovers one by one. Returns the ids that remain.
-async function deleteContent(name, ids, progress) {
-  const [uri, , , , live] = CONTENT[name];
-  const failed = [];
-  for (let i = 0; i < ids.length; i += 200) {
-    const batch = ids.slice(i, i + 200), where = `_id IN (${batch.join(",")})`;
-    await deleteRows(uri, ` IN (${batch.join(",")})`);
-    const out = await sh(`content query --uri ${uri} --projection _id --where ${q(live ? `${where} AND ${live}` : where)}`);
-    // A permission error also returns no rows, so only an explicit empty answer clears the batch.
-    const left = out.includes("No result found") ? [] : out.includes("Row:") ? parseRows(out).map((r) => r._id) : batch;
-    for (const id of left) {
-      await deleteRows(uri, `=${id}`);
-      const check = await sh(`content query --uri ${uri} --projection _id --where ${q(live ? `_id=${id} AND ${live}` : `_id=${id}`)}`);
-      if (!check.includes("No result found")) failed.push(id);
-    }
-    progress(Math.min(i + 200, ids.length));
-  }
-  return failed;
-}
-
 // ---------- settings and saved Wi-Fi (port of the script) ----------
 const SETTING_CATEGORIES = [["Wi-Fi", /wifi|wlan/i], ["Bluetooth", /bluetooth|^ble_/i],
   ["Mobile data & network", /mobile_data|data_roaming|airplane|network|apn|hotspot|tether|vpn|dns/i], ["Location", /location|gps/i],
@@ -2211,12 +2136,11 @@ async function loadKeyboards() {
 // ---------- cleanup tab ----------
 // [title, kind]. List kinds show items to select and delete; the others are single actions.
 const CLEAN = [
-  ["Delete", null], ["Contacts", "content"], ["Calendar", "content"], ["Call log", "content"], ["SMS", "content"],
-  ["Files", "storage"], ["Apps & app data", "storage"],
+  ["Delete", null], ["Files", "storage"], ["Apps & app data", "storage"],
   ["Reset", null], ["Saved Wi-Fi networks", "wifi"], ["Settings", "settings"], ["Keyboard learned words", "keyboard"], ["Screen lock & fingerprints", "lock"],
   ["Tools", null], ["Close apps & free RAM", "ram"], ["Flush free space", "trim"], ["Install apps", "installtab"], ["App names & icons", "names"],
 ];
-let cleanChoice = "Contacts", settingsCat = "Wi-Fi";
+let cleanChoice = "Saved Wi-Fi networks", settingsCat = "Wi-Fi";
 // (Storage and Cleanup used to have their own lock; the screen lock is now asked once, when connecting.)
 let gateOpen = null;
 function lockGate(name) {
@@ -2238,10 +2162,6 @@ function renderCleanup() {
   }));
   const kind = CLEAN.find(([t]) => t === cleanChoice)[1];
   const pane = $("#cleanPane");
-  if (kind === "content") return itemList(pane, {
-    title: cleanChoice, note: CONTENT[cleanChoice][3], load: () => loadContent(cleanChoice), verb: "Delete",
-    run: (ids, progress) => deleteContent(cleanChoice, ids, progress),
-  });
   if (kind === "wifi") return itemList(pane, {
     title: "Saved Wi-Fi networks", note: "Forgotten networks need their password again to reconnect.", load: loadWifi, verb: "Forget",
     run: async (ids, progress) => {

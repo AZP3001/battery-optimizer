@@ -22,7 +22,7 @@ ADB-based battery optimizer and cleanup tool for Android. Runs from Linux, Windo
 - **Backup / restore**: one `.zip` per app with the app (all split APKs), its `Android/data` and `Android/obb` files, and optionally Android's own backup. Same format in the web app and the script. Without root, private app data and logins mostly stay on the phone; apps that opt out of Android's backup need a new login after restore.
 - **Install**: drag in `.apk` files or split bundles (`.apks`, `.xapk`, `.apkm`, with OBB data); shows name, icon and version first, installs over USB.
 - **F-Droid store** (web app Install tab and script): search open-source apps, download the version that fits the phone, verify its SHA-256, install over USB. The web app reads a daily copy of F-Droid's list (`web/fdroid.json`, refreshed by a workflow) and the phone downloads the APK itself from an F-Droid mirror, checks it, installs it and deletes the file. Nothing is saved on the computer.
-- **Cleanup**: contacts, calendar, call log, SMS, saved Wi-Fi networks, settings reset, keyboard learned words, screen lock removal, free RAM, TRIM.
+- **Cleanup**: saved Wi-Fi networks, settings reset, keyboard learned words, screen lock removal, free RAM, TRIM.
 - No PIN is asked: the phone's own "Allow USB debugging" prompt is the check. Destructive actions ask for a plain confirmation; unsafe removals also ask you to type REMOVE.
 
 ## Setup: USB debugging
