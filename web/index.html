@@ -387,7 +387,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.22</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.23</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -3008,31 +3008,40 @@ $("#designToggle").onclick = () => {
 };
 
 // ---------- connect ----------
+const withTimeout = (promise, ms, why) => Promise.race([promise, new Promise((_, no) => setTimeout(() => no(new Error(why)), ms))]);
+let attemptDevice = null, attemptNo = 0;
 async function connect(known) {
+  const me = attemptNo, quiet = () => known || me !== attemptNo;   // no error popups for auto or cancelled attempts
   const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
   if (!manager) { await modal("Browser not supported", "This browser has no WebUSB. Use Chrome or Edge on a computer.", [["OK", "ok", "primary"]]); return; }
   const device = known || await manager.requestDevice();
   if (!device) return;
+  attemptDevice = device;
+  // A USB handle left open by an earlier, broken session in this tab blocks the new one.
+  if (device.raw?.opened) await device.raw.close().catch(() => {});
   let connection;
-  try { connection = await device.connect(); }
+  try { connection = await withTimeout(device.connect(), 15000, "the phone did not answer over USB"); }
   catch (e) {
-    if (known) return;
+    if (quiet()) return;
     await modal("Could not open the phone", `${e.message}\n\nAnother program is using it. Close other ADB programs (run "adb kill-server"), unplug and replug the phone, reload this page and try again.`, [["OK", "ok", "primary"]]);
     return;
   }
   $("#phoneName").textContent = "Tap Allow on the phone (tick \"Always allow\")...";
   let transport;
   try {
-    transport = await AdbDaemonTransport.authenticate({ serial: device.serial, connection,
-      credentialStore: new AdbWebCredentialStore("Battery Optimizer") });
+    // 90 s to tap Allow; after that the attempt is dropped instead of hanging forever
+    transport = await withTimeout(AdbDaemonTransport.authenticate({ serial: device.serial, connection,
+      credentialStore: new AdbWebCredentialStore("Battery Optimizer") }), 90000, "no answer from the phone (Allow not tapped, or the cable came loose)");
   } catch (e) {
     // Close the USB connection, otherwise the next try waits forever.
     try { await connection.close?.(); } catch {}
+    await device.raw?.close().catch(() => {});
     $("#phoneName").textContent = "Not connected";
-    if (known) return;
+    if (quiet()) return;
     await modal("Could not connect", `${e.message || e}\n\nUnplug and replug the phone, reload this page and try again.`, [["OK", "ok", "primary"]]);
     return;
   }
+  if (me !== attemptNo) { await transport.close().catch(() => {}); return; }   // replaced by a newer attempt
   adb = new Adb(transport);
   serial = device.serial;
   storeDevice = null;   // another phone may need other app versions
@@ -3060,14 +3069,25 @@ function setConnected(title) {
 // One connect at a time: a second one while the first waits for "Allow" makes the USB device fail.
 let connecting = false;
 const tryConnect = async (known) => {
-  if (connecting || adb) return;
-  connecting = true;
-  try { await connect(known); } catch (e) { $("#phoneName").textContent = "Not connected"; showError(e); }
-  finally { connecting = false; }
+  if (adb) return;
+  if (connecting) {
+    // a click while an attempt hangs: cut its USB handle so it fails now, then start fresh
+    if (known) return;
+    attemptNo++;   // first, so the old attempt fails quietly
+    await attemptDevice?.raw?.close().catch(() => {});
+    for (let i = 0; i < 30 && connecting; i++) await new Promise((r) => setTimeout(r, 100));
+  }
+  connecting = true; attemptNo++;
+  const me = attemptNo;
+  try { await connect(known); } catch (e) { if (me === attemptNo) { $("#phoneName").textContent = "Not connected"; showError(e); } }
+  finally { if (me === attemptNo) connecting = false; }
 };
 $("#connectBtn").onclick = () => tryConnect();
 $("#connectBig").onclick = () => tryConnect();
-AdbDaemonWebUsbDeviceManager.BROWSER?.getDevices?.()?.then((d) => { if (d.length === 1) tryConnect(d[0]); }).catch(() => {});
+const autoConnect = () => AdbDaemonWebUsbDeviceManager.BROWSER?.getDevices?.()?.then((d) => { if (d.length === 1) tryConnect(d[0]); }).catch(() => {});
+autoConnect();
+// replugging an allowed phone reconnects by itself
+navigator.usb?.addEventListener("connect", () => setTimeout(autoConnect, 500));
 $("#disconnectBtn").onclick = async () => { const a = adb; adb = null; appsLoaded = false; gateOpen = null; namesRun++; setConnected(""); await a?.close().catch(() => {}); };
 showTab("apps");
 
