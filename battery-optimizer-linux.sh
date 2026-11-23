@@ -2068,11 +2068,13 @@ SUGGESTED_KEEP = {"com.whatsapp", "org.thoughtcrime.securesms", "com.discord", "
 ALWAYS_KEEP = {"com.google.android.gms", "com.google.android.gsf", "com.sec.spp.push"}
 
 # Used while power saving is on. Samsung may ignore some of these; Android's own ones still apply.
+# Both key names (Android 11+ and older); each phone ignores the ones it does not know.
 SAVER_CONSTANTS = ",".join([
-    "force_all_apps_standby=true", "force_background_check=true", "quick_doze_enabled=true",
-    "optional_sensors_disabled=true", "aod_disabled=true", "vibration_disabled=true",
-    "launch_boost_disabled=true", "soundtrigger_disabled=true", "fullbackup_deferred=true",
-    "keyvaluebackup_deferred=true", "enable_night_mode=true",
+    "force_all_apps_standby=true", "force_background_check=true", "enable_night_mode=true",
+    "enable_quick_doze=true", "quick_doze_enabled=true", "disable_optional_sensors=true", "optional_sensors_disabled=true",
+    "disable_aod=true", "aod_disabled=true", "disable_vibration=true", "vibration_disabled=true",
+    "disable_launch_boost=true", "launch_boost_disabled=true", "disable_soundtrigger=true", "soundtrigger_disabled=true",
+    "defer_full_backup=true", "fullbackup_deferred=true", "defer_keyvalue_backup=true", "keyvaluebackup_deferred=true",
 ])
 
 # (namespace, key, value, Samsung-only: set only if the phone already has it, what it is)
@@ -2112,8 +2114,8 @@ BATTERY_SETTINGS = [
     ("global", "transition_animation_scale", "0.5", False, "Transition animations 0.5x"),
     ("global", "animator_duration_scale", "0.5", False, "Animator duration 0.5x"),
     ("secure", "doze_always_on", "0", False, "Always On Display (Android): off"),
-    ("secure", "aod_mode", "0", True, "Always On Display (Samsung): off"),
-    ("secure", "aod_tap_to_show_mode", "0", True, "Tap to show AOD: off"),
+    ("system", "aod_mode", "0", True, "Always On Display (Samsung): off"),
+    ("system", "aod_tap_to_show_mode", "0", True, "Tap to show AOD: off"),
     ("secure", "doze_pulse_on_pick_up", "0", False, "Screen lights up when picked up: off"),
     ("secure", "doze_tap_gesture", "0", False, "Screen lights up on tap: off"),
     ("secure", "wake_gesture_enabled", "0", False, "Wake gesture: off"),

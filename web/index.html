@@ -387,7 +387,7 @@
 
   <details class="log"><summary>Activity log</summary><pre id="log"></pre></details>
   <p class="muted small" style="margin-top:28px">Prefer a terminal? Download the <a href="../battery-optimizer-linux.sh">Linux script</a> or the <a href="../battery-optimizer-windows.bat">Windows file</a>.
-    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.20</p>
+    They also have the F-Droid store. Source on <a href="https://github.com/AZP3001/battery-optimizer">GitHub</a>. Version 1.21</p>
 </main>
 
 <dialog id="modal"></dialog>
@@ -437,9 +437,12 @@ const saveKeep = (k) => saveJson("phone-keep", [...k].sort());
 const SUGGESTED_KEEP = new Set(["com.whatsapp", "org.thoughtcrime.securesms", "com.discord", "org.telegram.messenger", "com.grupet.web.app"]);
 const ALWAYS_KEEP = new Set(["com.google.android.gms", "com.google.android.gsf", "com.sec.spp.push"]);
 const PROTECTED_APPS = /^android$|providers\.(settings|telephony)|shell|systemui|keyguard|permissioncontroller|setupwizard|provision|^com\.android\.phone$|packageinstaller|launcher|com\.miui\.(home|securitycenter)/;
-const SAVER_CONSTANTS = ["force_all_apps_standby=true", "force_background_check=true", "quick_doze_enabled=true",
-  "optional_sensors_disabled=true", "aod_disabled=true", "vibration_disabled=true", "launch_boost_disabled=true",
-  "soundtrigger_disabled=true", "fullbackup_deferred=true", "keyvaluebackup_deferred=true", "enable_night_mode=true"].join(",");
+// Both key names (Android 11+ and older); each phone ignores the ones it does not know.
+const SAVER_CONSTANTS = ["force_all_apps_standby=true", "force_background_check=true", "enable_night_mode=true",
+  "enable_quick_doze=true", "quick_doze_enabled=true", "disable_optional_sensors=true", "optional_sensors_disabled=true",
+  "disable_aod=true", "aod_disabled=true", "disable_vibration=true", "vibration_disabled=true", "disable_launch_boost=true", "launch_boost_disabled=true",
+  "disable_soundtrigger=true", "soundtrigger_disabled=true", "defer_full_backup=true", "fullbackup_deferred=true",
+  "defer_keyvalue_backup=true", "keyvaluebackup_deferred=true"].join(",");
 // [namespace, key, value, Samsung-only (set only if the phone already has it), what it is]
 const BATTERY_SETTINGS = [
   ["global", "mobile_data_always_on", "0", false, "Mobile data stays on while on Wi-Fi: off"],
@@ -477,8 +480,8 @@ const BATTERY_SETTINGS = [
   ["global", "transition_animation_scale", "0.5", false, "Transition animations 0.5x"],
   ["global", "animator_duration_scale", "0.5", false, "Animator duration 0.5x"],
   ["secure", "doze_always_on", "0", false, "Always On Display (Android): off"],
-  ["secure", "aod_mode", "0", true, "Always On Display (Samsung): off"],
-  ["secure", "aod_tap_to_show_mode", "0", true, "Tap to show AOD: off"],
+  ["system", "aod_mode", "0", true, "Always On Display (Samsung): off"],
+  ["system", "aod_tap_to_show_mode", "0", true, "Tap to show AOD: off"],
   ["secure", "doze_pulse_on_pick_up", "0", false, "Screen lights up when picked up: off"],
   ["secure", "doze_tap_gesture", "0", false, "Screen lights up on tap: off"],
   ["secure", "wake_gesture_enabled", "0", false, "Wake gesture: off"],
@@ -587,7 +590,7 @@ function displaySizes(disp, modes) {
 }
 const sizeName = (w) => ({ 720: "HD+", 1080: "FHD+", 1440: "WQHD+" }[w] || "");
 // Preinstalled apps most people never asked for (only apps you did not install yourself count).
-const BLOAT = /^com\.(netflix|facebook|linkedin|spotify|zhiliaoapp|ss\.android\.ugc|booking|amazon\.|king\.|microsoft\.(skydrive|appmanager|office)|hiya|opera|snapchat|dti\.|aura\.|ironsource|digitalturbine|samsung\.android\.game\.gos|samsung\.android\.(smartsuggestions|livestickers|aremojieditor)|samsung\.android\.(game\.gamehome|bixby|arzone|aremoji|stickercenter|kidsinstaller|app\.spage|tvplus)|sec\.android\.app\.(samsungapps|kidshome)|nothing\.(experience|userguide)|miui\.(analytics|msa|videoplayer|player|yellowpage|cloudbackup|cloudservice|micloudsync|bugreport|miservice|daemon|android\.fashiongallery|cleaner)|xiaomi\.(mipicks|joyose|payment|discover|glgm|ugd|barrage|micloud)|mi\.(globalbrowser|globalminusscreen)|samsung\.android\.(app\.tips|themestore|forest|scloud|mateagent|ardrawing|visionintelligence)|vodafone|google\.android\.(apps\.(youtube\.music|tachyon|subscriptions\.red|magazines|podcasts)|videos))/;
+const BLOAT = /^com\.(netflix|facebook|linkedin|spotify|zhiliaoapp|ss\.android\.ugc|booking|amazon\.|king\.|microsoft\.(skydrive|appmanager|office)|hiya|opera|snapchat|dti\.|aura\.|ironsource|digitalturbine|samsung\.android\.aircommandmanager|samsung\.android\.game\.gos|samsung\.android\.(smartsuggestions|livestickers|aremojieditor)|samsung\.android\.(game\.gamehome|bixby|arzone|aremoji|stickercenter|kidsinstaller|app\.spage|tvplus)|sec\.android\.app\.(samsungapps|kidshome)|nothing\.(experience|userguide)|miui\.(analytics|msa|videoplayer|player|yellowpage|cloudbackup|cloudservice|micloudsync|bugreport|miservice|daemon|android\.fashiongallery|cleaner)|xiaomi\.(mipicks|joyose|payment|discover|glgm|ugd|barrage|micloud)|mi\.(globalbrowser|globalminusscreen)|samsung\.android\.(app\.tips|themestore|forest|scloud|mateagent|ardrawing|visionintelligence)|vodafone|google\.android\.(apps\.(youtube\.music|tachyon|subscriptions\.red|magazines|podcasts)|videos))/;
 
 // Android refuses to switch power saving while the phone charges, and over USB it always charges.
 // So the charger is hidden from Android for a moment ("unplug" is only pretend, "reset" undoes it).
@@ -2811,17 +2814,26 @@ document.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => Promis
 
 
 // ---------- power saving mode tuner (what Savertuner does: battery_saver_constants + auto on/off) ----------
-// [key, label, value that saves battery]. "x_disabled=false" means feature x is ON while saving.
+// [name since Android 11, name before it, true when the old name means the opposite, label].
+// Phones read only the names their Android knows (Samsung/Android 17 use the new ones), so both are written.
 const TUNER_FLAGS = [
-  ["force_all_apps_standby", "Put all background apps to sleep", "true"], ["force_background_check", "Stop background services", "true"],
-  ["quick_doze_enabled", "Deep sleep right after screen off", "true"], ["datasaver_disabled", "Data Saver on", "false"],
-  ["firewall_disabled", "Block network for sleeping apps", "false"], ["enable_night_mode", "Dark mode", "true"],
-  ["animation_disabled", "Animations off", "true"], ["vibration_disabled", "Vibration off", "true"],
-  ["aod_disabled", "Always-on display off", "true"], ["optional_sensors_disabled", "Optional sensors off", "true"],
-  ["launch_boost_disabled", "No CPU boost when opening apps", "true"], ["soundtrigger_disabled", "\"Hey Google\" listening off", "true"],
-  ["fullbackup_deferred", "Delay full backups", "true"], ["keyvaluebackup_deferred", "Delay app-setting backups", "true"],
-  ["adjust_brightness_disabled", "Keep brightness (don't dim)", "false"],
+  ["force_all_apps_standby", "force_all_apps_standby", false, "Put all background apps to sleep"],
+  ["force_background_check", "force_background_check", false, "Stop background services"],
+  ["enable_quick_doze", "quick_doze_enabled", false, "Deep sleep right after screen off"],
+  ["enable_datasaver", "datasaver_disabled", true, "Data Saver on"],
+  ["enable_firewall", "firewall_disabled", true, "Block network for sleeping apps"],
+  ["enable_night_mode", "enable_night_mode", false, "Dark mode"],
+  ["disable_animation", "animation_disabled", false, "Animations off"],
+  ["disable_vibration", "vibration_disabled", false, "Vibration off"],
+  ["disable_aod", "aod_disabled", false, "Always-on display off"],
+  ["disable_optional_sensors", "optional_sensors_disabled", false, "Optional sensors off"],
+  ["disable_launch_boost", "launch_boost_disabled", false, "No CPU boost when opening apps"],
+  ["disable_soundtrigger", "soundtrigger_disabled", false, "\"Hey Google\" listening off"],
+  ["defer_full_backup", "fullbackup_deferred", false, "Delay full backups"],
+  ["defer_keyvalue_backup", "keyvaluebackup_deferred", false, "Delay app-setting backups"],
+  ["enable_brightness_adjustment", "adjust_brightness_disabled", true, "Dim the screen"],
 ];
+const flagOn = (c, [k, old, inv]) => k in c ? c[k] === "true" : old in c ? (c[old] === "true") !== inv : false;
 const TUNER_LOCATION = [["0", "Location unchanged"], ["1", "GPS off when screen off"], ["2", "All location off when screen off"], ["3", "Location only for the app on screen"], ["4", "Location throttled when screen off"]];
 let tuner = null;
 const parseConstants = (t) => Object.fromEntries((t === "null" ? "" : t).split(",").filter((x) => x.includes("=")).map((x) => x.split("=").map((y) => y.trim())));
@@ -2830,14 +2842,14 @@ async function renderTuner() {
   tuner = { c: parseConstants((c || "").trim()), trig: parseInt(trig, 10) || 0, off: off?.trim() !== "0", offLvl: parseInt(offLvl, 10) || 90 };
   const box = $("#tuner"); box.className = "";
   const flags = el("div"); flags.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px";
-  for (const [k, label, good] of TUNER_FLAGS) {
-    const l = el("label", "small"), cb = el("input"); cb.type = "checkbox"; cb.dataset.k = k; cb.dataset.good = good;
-    cb.checked = (tuner.c[k] ?? "") === good; l.append(cb, " " + label); flags.append(l);
+  for (const f of TUNER_FLAGS) {
+    const l = el("label", "small"), cb = el("input"); cb.type = "checkbox"; cb.dataset.k = f[0];
+    cb.checked = flagOn(tuner.c, f); l.append(cb, " " + f[3]); flags.append(l);
   }
   const num = (label, id, v, min, max) => { const l = el("label", "small"), i = el("input", "search"); i.type = "number"; i.id = id; i.min = min; i.max = max; i.value = v; i.style.cssText = "width:80px;max-width:80px;flex:none"; l.append(label + " ", i); return l; };
   const loc = el("select", "search"); loc.id = "tunerLoc";
   for (const [v, t] of TUNER_LOCATION) { const o = el("option", "", t); o.value = v; loc.append(o); }
-  loc.value = tuner.c.location_mode || "0"; loc.style.cssText = "width:auto;flex:none";
+  loc.value = tuner.c.location_mode || tuner.c.gps_mode || "0"; loc.style.cssText = "width:auto;flex:none";
   const offCb = el("input"); offCb.type = "checkbox"; offCb.id = "tunerOff"; offCb.checked = tuner.off;
   const offL = el("label", "small"); offL.append(offCb, " Turn off again after charging");
   const extra = el("div", "row"); extra.style.cssText = "gap:16px;flex-wrap:wrap;margin-top:10px";
@@ -2847,10 +2859,10 @@ async function renderTuner() {
 }
 function tunerCommands() {
   const c = { ...tuner.c };
-  document.querySelectorAll("#tuner input[data-k]").forEach((cb) => { c[cb.dataset.k] = cb.checked ? cb.dataset.good : (cb.dataset.good === "true" ? "false" : "true"); });
+  for (const [k, old, inv] of TUNER_FLAGS) { const on = $(`#tuner input[data-k="${k}"]`).checked; c[k] = String(on); c[old] = String(on !== inv); }
   const clamp = (id, lo, hi) => Math.min(hi, Math.max(lo, parseInt($(id).value, 10) || lo));
   c.adjust_brightness_factor = (clamp("#tunerBright", 10, 100) / 100).toFixed(2);
-  c.location_mode = $("#tunerLoc").value;
+  c.location_mode = c.gps_mode = $("#tunerLoc").value;
   return { "battery_saver_constants": Object.entries(c).map(([k, v]) => `${k}=${v}`).join(","),
     "low_power_trigger_level": String(clamp("#tunerTrig", 0, 99)), "automatic_power_save_mode": clamp("#tunerTrig", 0, 99) ? "0" : null,
     "low_power_sticky_auto_disable_enabled": $("#tunerOff").checked ? "1" : "0", "low_power_sticky_auto_disable_level": String(clamp("#tunerOffLvl", 50, 100)) };
@@ -2867,7 +2879,7 @@ async function applyTuner(values) {
 }
 Object.assign(ACTIONS, {
   tunerApply: (b) => runButton(b, async () => { await applyTuner(tunerCommands()); await renderTuner(); }, $("#res-tuner")),
-  tunerMax: () => { document.querySelectorAll("#tuner input[data-k]").forEach((cb) => (cb.checked = cb.dataset.k !== "adjust_brightness_disabled")); $("#tunerLoc").value = "2"; $("#tunerBright").value = 50; $("#tunerTrig").value = 30; toast("Strongest settings picked. Press Apply."); },
+  tunerMax: () => { document.querySelectorAll("#tuner input[data-k]").forEach((cb) => (cb.checked = true)); $("#tunerLoc").value = "2"; $("#tunerBright").value = 50; $("#tunerTrig").value = 30; toast("Strongest settings picked. Press Apply."); },
   tunerReset: (b) => runButton(b, async () => { await sh("settings delete global battery_saver_constants; settings put global low_power_trigger_level 0"); await renderTuner(); }, $("#res-tuner")),
 });
 
@@ -2897,17 +2909,18 @@ async function collectTelemetry(step = () => {}) {
   // battery history since the last full charge: discharge, radio time, what wakes the phone (hardware names, not personal)
   const stats = await sh("dumpsys batterystats --charged | grep -E 'Time on battery|Total run time|Discharge|discharge:|Screen on:|Screen doze|Mobile radio active|Wifi on:|Wifi running|Phone signal levels|Interactive:|Device idle mode|Device light idling|Connectivity changes|Camera on|Flashlight|Sensor|Wakeup reason|Kernel Wake lock' | head -120");
   step(45);
-  const sys = await sh("cat /sys/class/power_supply/battery/cycle_count /sys/class/power_supply/battery/charge_full /sys/class/power_supply/battery/charge_full_design 2>/dev/null | tr '\n' ' '; echo; " +
+  const sys = await sh(
     `for c in /sys/devices/system/cpu/cpu*/cpufreq; do echo "$(cat $c/scaling_governor 2>/dev/null) $(cat $c/cpuinfo_max_freq 2>/dev/null)"; done | sort | uniq -c | tr '\\n' ';'; echo; ` +
     "grep -E 'MemTotal|SwapTotal' /proc/meminfo | tr -s ' ' | tr '\n' ';'; echo; dumpsys activity services | grep -c ServiceRecord; dumpsys jobscheduler | grep -c 'JOB #'");
-  const [cycles, cpu, mem, services, jobs] = sys.split("\n");
+  const [cpu, mem, services, jobs] = sys.split("\n");
   step(60);
   const [buckets, whitelist, features] = await Promise.all([sh("am get-standby-bucket 2>/dev/null"), sh("dumpsys deviceidle whitelist"), sh("pm list features")]);
   step(75);
   if (!appsLoaded) await loadApps();
   const byUid = {}; for (const a of APPS) if (a.uid !== undefined) byUid[a.uid] ??= a.p;
-  const use = parsePowerUse(await sh("dumpsys batterystats --charged | grep -E '^ +U(ID|id) [u0-9a]+: [0-9.]+'"))
-    .slice(0, 25).map(([uid, mah]) => ({ p: byUid[uid] || (Number(uid) < 10000 ? "android-system" : "other"), mah: Math.round(mah * 10) / 10 }));
+  const useBy = parsePowerUse(await sh("dumpsys batterystats --charged | grep -E '^ +U(ID|id) [u0-9a]+: [0-9.]+'"))
+    .reduce((m, [uid, mah]) => { const p = byUid[uid] || (Number(uid) < 10000 ? "android-system" : "other"); m[p] = (m[p] || 0) + mah; return m; }, {});
+  const use = Object.entries(useBy).sort((a, b) => b[1] - a[1]).slice(0, 25).map(([p, mah]) => ({ p, mah: Math.round(mah * 10) / 10 }));
   // only who holds a wake lock, never its tag: sync tags can contain account names
   const awake = [...new Set(parseWakeLocks(await sh("dumpsys power | grep WAKE_LOCK")).map(([uid]) => byUid[uid] || "android-system"))];
   return {
@@ -2918,7 +2931,7 @@ async function collectTelemetry(step = () => {}) {
     thermal: thermal.trim(), wake_locks: parseInt(wakes, 10) || 0, keeping_awake: awake,
     screen_on_since_charge: await screenOnTime() || null, power_use_mah: use,
     battery_history: stats.trim().split("\n").map((l) => l.trim()).filter(Boolean),
-    battery_sysfs: (cycles || "").trim(), cpu: (cpu || "").trim(), memory: (mem || "").trim(),
+    cpu: (cpu || "").trim(), memory: (mem || "").trim(),
     running_services: parseInt(services, 10) || 0, scheduled_jobs: parseInt(jobs, 10) || 0,
     standby_buckets: buckets.trim().slice(0, 20000),
     // apps allowed to ignore battery optimization ("system,pkg,uid" lines)
