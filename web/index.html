@@ -249,11 +249,11 @@
     #phoneName { overflow:hidden; text-overflow:ellipsis; min-width:0; }
     #shareStatus { display:none; }
     .phone .btn { padding:6px 12px; }
-    nav, body.glass nav { order:3; flex:0 0 100%; flex-wrap:nowrap; justify-content:flex-start; overflow-x:auto; scrollbar-width:none; margin:0 -12px; padding:0 8px; width:auto; }
+    nav, body.glass nav { order:3; flex:0 0 100%; flex-wrap:nowrap; justify-content:flex-start; overflow-x:auto; scrollbar-width:none; margin:0; padding:0; min-width:0; }
     body.glass nav { margin:4px 0 8px; padding:4px; }
     nav::-webkit-scrollbar { display:none; }
     nav button { padding:10px 12px; }
-    main { padding:16px 12px 80px; }
+    main { padding:16px 12px 80px; overflow-wrap:anywhere; }   /* long package names and paths wrap instead of widening the page */
     h1 { font-size:21px; }
     .card { padding:16px; }
     .cards { grid-template-columns:1fr; gap:12px; }
