@@ -1,6 +1,6 @@
 # Battery Optimizer for Android
 
-ADB-based battery optimizer and cleanup tool for Android. Runs from Linux, Windows or the browser over USB debugging. No root, nothing installed on the phone.
+ADB-based battery optimizer and cleanup tool for Android. Runs from Linux, Windows or the browser over USB debugging, or as an app on the phone itself through Shizuku. No root.
 
 **https://azp3001.github.io/battery-optimizer/web/**
 
@@ -32,6 +32,15 @@ Settings > About phone > tap **Build number** 7 times. Then Settings > Developer
 ## Web app
 
 Open the link above, press **Connect**, pick the phone. App names, icons and the keep list are stored in the browser. Close other ADB programs first (`adb kill-server`).
+
+## Android app (Shizuku)
+
+The same web app as an APK that runs on the phone, no computer needed. It sends the same commands through [Shizuku](https://shizuku.rikka.app/), which has the rights of `adb shell`.
+
+1. Install Shizuku and start it with **Wireless debugging** (Android 11+; the steps are in the Shizuku app). It has to be started again after every reboot.
+2. Install `battery-optimizer.apk` from [Releases](https://github.com/AZP3001/battery-optimizer/releases), open it, press **Connect** and allow it in Shizuku.
+
+Backup to a folder is not available in the app (it needs Chrome or Edge on a computer). Build it yourself: `cd android && ./gradlew assembleRelease` (needs the Android SDK).
 
 ## Windows
 

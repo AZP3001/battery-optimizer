@@ -1,0 +1,29 @@
+plugins { id "com.android.application" }
+
+android {
+    namespace "io.github.azp3001.batteryoptimizer"
+    compileSdk 35
+    defaultConfig {
+        applicationId "io.github.azp3001.batteryoptimizer"
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "1.0"
+    }
+    // shortcut: release is signed with the debug key so the APK installs without setup; add a real keystore before publishing to a store.
+    buildTypes { release { signingConfig signingConfigs.debug } }
+    // The app shows the same web app as the website, plus the script it reads its app table from.
+    sourceSets.main.assets.srcDirs += layout.buildDirectory.dir("web").get().asFile
+}
+
+tasks.register("copyWeb", Sync) {
+    from("../../web")
+    from("../../battery-optimizer-linux.sh")
+    into(layout.buildDirectory.dir("web"))
+}
+preBuild.dependsOn copyWeb
+
+dependencies {
+    implementation "dev.rikka.shizuku:api:13.1.5"
+    implementation "dev.rikka.shizuku:provider:13.1.5"
+}

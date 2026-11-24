@@ -3082,7 +3082,61 @@ $("#designToggle").onclick = () => {
 // ---------- connect ----------
 const withTimeout = (promise, ms, why) => Promise.race([promise, new Promise((_, no) => setTimeout(() => no(new Error(why)), ms))]);
 let attemptDevice = null, attemptNo = 0;
+// Inside the Android app (android/): commands run through Shizuku, which has the rights of "adb shell", instead of WebUSB.
+// This object offers the few calls of webadb.js's Adb that the page uses.
+const SHIZUKU = window.Shizuku;
+function shizukuAdb() {
+  const S = SHIZUKU;
+  const b64 = (u) => { let s = ""; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000)); return btoa(s); };
+  async function spawn(cmd) {
+    const id = S.start(cmd);
+    const res = await fetch(`/__out?id=${id}`);   // awaited first: the app forgets the command once its exit code is read
+    let exited;
+    return { output: res.body, kill: async () => S.kill(id),
+      stdin: new WritableStream({ write: (c) => S.write(id, b64(c)), close: () => S.closeIn(id) }),
+      get exited() { return exited ??= fetch(`/__exit?id=${id}`).then((r) => r.text()).then(Number); } };
+  }
+  async function spawnWait(cmd) {
+    const p = await spawn(cmd), out = new Uint8Array(await new Response(p.output).arrayBuffer());
+    await p.exited;
+    return out;
+  }
+  const sync = {
+    async write({ filename, file }) {
+      const p = await spawn(`cat > ${q(filename)}`);
+      await file.pipeTo(p.stdin);
+      if (await p.exited) throw new Error("could not write " + filename);
+    },
+    read(path) {
+      const t = new TransformStream();
+      spawn(`cat ${q(path)} 2>/dev/null`).then((p) => p.output.pipeTo(t.writable).then(() => p.exited)).catch((e) => t.writable.abort(e).catch(() => {}));
+      return t.readable;
+    },
+    dispose: async () => {},
+  };
+  return { subprocess: { noneProtocol: { spawn, spawnWait, spawnWaitText: async (cmd) => new TextDecoder().decode(await spawnWait(cmd)) } },
+    sync: async () => sync, close: async () => {} };
+}
+async function connectShizuku(quiet) {
+  let st = SHIZUKU.status();
+  if (st === "ask" && !quiet) {
+    SHIZUKU.ask();
+    for (let i = 0; i < 1200 && st === "ask"; i++) { await new Promise((r) => setTimeout(r, 100)); st = SHIZUKU.status(); }
+  }
+  if (st !== "ok") {
+    if (!quiet) await modal("Shizuku needed", {
+      off: "Shizuku is not running. Open the Shizuku app, start it with Wireless debugging, then press Connect again.",
+      old: "This Shizuku is too old. Update Shizuku, then press Connect again.",
+    }[st] || "Allow Battery Optimizer in the Shizuku app (or in the popup), then press Connect again.", [["OK", "ok", "primary"]]);
+    return;
+  }
+  adb = shizukuAdb();
+  serial = (await sh("getprop ro.serialno")).trim() || "phone";
+  await afterConnect();
+}
+
 async function connect(known) {
+  if (SHIZUKU) return connectShizuku(!!known);
   const me = attemptNo, quiet = () => known || me !== attemptNo;   // no error popups for auto or cancelled attempts
   const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
   if (!manager) { await modal("Browser not supported", "This browser has no WebUSB. Use Chrome or Edge on a computer.", [["OK", "ok", "primary"]]); return; }
@@ -3116,8 +3170,11 @@ async function connect(known) {
   if (me !== attemptNo) { await transport.close().catch(() => {}); return; }   // replaced by a newer attempt
   adb = new Adb(transport);
   serial = device.serial;
-  storeDevice = null;   // another phone may need other app versions
   transport.disconnected.then(() => { if (adb) { adb = null; appsLoaded = false; gateOpen = null; namesRun++; setConnected(""); toast("Phone disconnected."); } });
+  await afterConnect();
+}
+async function afterConnect() {
+  storeDevice = null;   // another phone may need other app versions
   // "A065 | Nothing Phone (2)": model number, then the name the phone uses for itself.
   const model = (await sh("getprop ro.product.model")).trim();
   const names = (await sh("getprop ro.product.marketname; getprop ro.product.vendor.marketname; settings get global device_name; getprop ro.product.brand"))
@@ -3156,8 +3213,15 @@ const tryConnect = async (known) => {
 };
 $("#connectBtn").onclick = () => tryConnect();
 $("#connectBig").onclick = () => tryConnect();
-const autoConnect = () => AdbDaemonWebUsbDeviceManager.BROWSER?.getDevices?.()?.then((d) => { if (d.length === 1) tryConnect(d[0]); }).catch(() => {});
+const autoConnect = () => SHIZUKU ? tryConnect(true) : AdbDaemonWebUsbDeviceManager.BROWSER?.getDevices?.()?.then((d) => { if (d.length === 1) tryConnect(d[0]); }).catch(() => {});
 autoConnect();
+if (SHIZUKU) {
+  $("#connectView ol").innerHTML = "<li>Install <b>Shizuku</b> and start it with <b>Wireless debugging</b> (steps are in the Shizuku app).</li><li>Press <b>Connect</b> and allow Battery Optimizer.</li>";
+  $("#connectView p.small").remove();
+  // Shizuku may only answer a moment after start, or be started while this app waits in the background.
+  setTimeout(autoConnect, 1000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) autoConnect(); });
+}
 // replugging an allowed phone reconnects by itself
 navigator.usb?.addEventListener("connect", () => setTimeout(autoConnect, 500));
 $("#disconnectBtn").onclick = async () => { const a = adb; adb = null; appsLoaded = false; gateOpen = null; namesRun++; setConnected(""); await a?.close().catch(() => {}); };
