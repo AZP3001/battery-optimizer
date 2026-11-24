@@ -18,6 +18,8 @@ import android.webkit.WebViewClient;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.Map;
@@ -99,7 +101,8 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
-    // /__out?id=N streams a command's output, /__exit?id=N waits for it to end and returns the exit code;
+    // /__out?id=N streams a command's output, /__exit?id=N waits for it to end and returns the exit code,
+    // /__get?url= fetches this app's own GitHub releases (for updates; GitHub's downloads don't allow web pages);
     // everything else comes from the app's assets (web/ and the script).
     WebResourceResponse serve(Uri u) {
         if (!HOST.equals(u.getHost())) return null;
@@ -111,6 +114,17 @@ public class MainActivity extends Activity {
                 Process p = procs.remove(id);
                 return response("text/plain", new ByteArrayInputStream(String.valueOf(p.waitFor()).getBytes()));
             }
+            if (path.equals("/__get")) {
+                String url = u.getQueryParameter("url"), low = url == null ? "" : url.toLowerCase();
+                if (low.contains("..") || !(low.startsWith("https://api.github.com/repos/azp3001/battery-optimizer/")
+                        || low.startsWith("https://github.com/azp3001/battery-optimizer/releases/download/"))) throw new SecurityException(url);
+                HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                c.setRequestProperty("User-Agent", "battery-optimizer");
+                int code = c.getResponseCode();
+                InputStream in = code < 400 ? c.getInputStream() : c.getErrorStream();
+                return new WebResourceResponse("application/octet-stream", null, code, code < 400 ? "OK" : "Error", NO_STORE,
+                        in != null ? in : new ByteArrayInputStream(new byte[0]));
+            }
             String file = path.equals("/") ? "index.html" : path.substring(1);
             return response(mime(file), getAssets().open(file));
         } catch (Exception e) {
@@ -118,8 +132,10 @@ public class MainActivity extends Activity {
         }
     }
 
+    static final Map<String, String> NO_STORE = Collections.singletonMap("Cache-Control", "no-store");
+
     static WebResourceResponse response(String type, InputStream in) {
-        return new WebResourceResponse(type, "utf-8", 200, "OK", Collections.singletonMap("Cache-Control", "no-store"), in);
+        return new WebResourceResponse(type, "utf-8", 200, "OK", NO_STORE, in);
     }
 
     static String mime(String f) {
@@ -136,6 +152,11 @@ public class MainActivity extends Activity {
             if (Shizuku.isPreV11()) return "old";
             if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) return "ok";
             return denied ? "denied" : "ask";
+        }
+
+        @JavascriptInterface
+        public String version() {
+            try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { return ""; }
         }
 
         @JavascriptInterface

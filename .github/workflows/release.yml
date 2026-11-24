@@ -19,7 +19,15 @@ jobs:
       - run: bash -n battery-optimizer-linux.sh && ./battery-optimizer-linux.sh selfcheck
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: "17" }
-      - run: cd android && ./gradlew --no-daemon assembleRelease && cp app/build/outputs/apk/release/app-release.apk ../battery-optimizer.apk
+      # The signing key must stay the same across releases, or the app cannot update itself.
+      - run: |
+          [ -n "$KEYSTORE" ] || { echo "::error::Add the ANDROID_KEYSTORE secret (Settings > Secrets and variables > Actions), see the README"; exit 1; }
+          echo "$KEYSTORE" | base64 -d > android/app/release.jks
+          cd android && ./gradlew --no-daemon assembleRelease -PappVersion="$TAG" -PappCode="$GITHUB_RUN_NUMBER"
+          cp app/build/outputs/apk/release/app-release.apk ../battery-optimizer.apk
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          TAG: ${{ inputs.version || github.ref_name }}
       # Block scalar (|) so the colons in the notes are not read as YAML.
       - run: |
           gh release create "$TAG" --target "$GITHUB_SHA" battery-optimizer-linux.sh battery-optimizer-windows.bat battery-optimizer.apk --title "Battery Optimizer $TAG" --notes "Linux: download battery-optimizer-linux.sh, run chmod +x on it, then ./battery-optimizer-linux.sh battery. Windows: download battery-optimizer-windows.bat and battery-optimizer-linux.sh into the same folder and double-click the .bat. Android: install battery-optimizer.apk and connect through Shizuku. See the README for setup."

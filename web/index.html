@@ -227,6 +227,36 @@
   body.glass h1, body.glass h2 { font-weight:650; letter-spacing:-.02em; }
   /* one way to do each thing: hide shortcuts that only repeat another tab */
   body.glass .dup { display:none !important; }
+
+  /* phones: title and phone status on one line, tabs in one row that scrolls sideways, less padding */
+  @media (max-width:700px) {
+    .bar { padding:8px 12px 0; gap:6px 10px; min-height:0; }
+    .brand { font-size:0; }   /* hides the "Battery Optimizer" text node only; logo and design switch stay, so the phone name fits */
+    .phone { flex:1; min-width:0; justify-content:flex-end; gap:8px; font-size:14px; }
+    #phoneName { overflow:hidden; text-overflow:ellipsis; min-width:0; }
+    #shareStatus { display:none; }
+    .phone .btn { padding:6px 12px; }
+    nav, body.glass nav { order:3; flex:0 0 100%; flex-wrap:nowrap; justify-content:flex-start; overflow-x:auto; scrollbar-width:none; margin:0 -12px; padding:0 8px; width:auto; }
+    body.glass nav { margin:4px 0 8px; padding:4px; }
+    nav::-webkit-scrollbar { display:none; }
+    nav button { padding:10px 12px; }
+    main { padding:16px 12px 80px; }
+    h1 { font-size:21px; }
+    .card { padding:16px; }
+    .cards { grid-template-columns:1fr; gap:12px; }
+    .rows { padding:4px 14px; }
+    .connect { margin:16px auto; }
+    .app { gap:10px; padding:10px 12px; }
+    .search { min-width:0; flex:1 1 100%; }
+    .applybar { flex-wrap:wrap; bottom:8px; padding:10px 12px; }
+    .applybar .btn { flex:1; }
+    dialog { padding:18px; }
+    dialog .actions { flex-wrap:wrap; }
+    dialog .actions .btn { flex:1; }
+    .size { min-width:0; }
+    .presets { grid-template-columns:1fr; }
+    pre, code { word-break:break-all; white-space:pre-wrap; }
+  }
 </style>
 </head>
 <body>
@@ -898,7 +928,14 @@ function iconEl(a, size = 36) {
 }
 
 // Shows a question in its own dialog and resolves to the pressed button's value ("" for Esc).
+// One question at a time: a second one (e.g. an update while the sharing question is open) waits for the first.
+let modalTurn = Promise.resolve();
 function modal(title, text, buttons, extra) {
+  const answer = modalTurn.then(() => showModal(title, text, buttons, extra));
+  modalTurn = answer;
+  return answer;
+}
+function showModal(title, text, buttons, extra) {
   const d = $("#confirm");
   return new Promise((resolve) => {
     const body = el("p", "muted"); body.style.whiteSpace = "pre-wrap"; body.textContent = text;
@@ -3222,6 +3259,37 @@ if (SHIZUKU) {
   setTimeout(autoConnect, 1000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) autoConnect(); });
 }
+
+// App updates: on start, compare the app's version (the release tag it was built for) with GitHub's latest release.
+// Update downloads the APK through the app, installs it with Shizuku and opens the app again.
+async function checkUpdate() {
+  const mine = SHIZUKU.version?.() || "";
+  if (!/^v\d/.test(mine)) return;   // built by hand, not from a release
+  const get = (url) => fetch("/__get?url=" + encodeURIComponent(url));
+  const r = await get("https://api.github.com/repos/AZP3001/battery-optimizer/releases/latest");
+  if (!r.ok) return;
+  const rel = await r.json(), asset = rel.assets?.find((a) => a.name.endsWith(".apk"));
+  if (!asset || rel.tag_name === mine) return;
+  if (await modal(`Update to ${rel.tag_name}?`, `You have ${mine}. The app downloads the new version, installs it and opens again by itself.`,
+    [["Later", ""], ["Update", "ok", "primary"]]) !== "ok") return;
+  if (!adb) await tryConnect();
+  if (!adb) return;
+  toast("Downloading the update...");
+  const dl = await get(asset.browser_download_url);
+  if (!dl.ok) throw new Error("the update could not be downloaded");
+  const file = "/data/local/tmp/battery-optimizer-update.apk";
+  await pushBlob(await dl.blob(), file, (pc) => toast(`Copying the update ${pc}%`));
+  toast("Installing the update, the app restarts...");
+  // Installing replaces this app and ends it, so the install runs on its own in the background and starts the app again.
+  await sh(`rm -f ${file}.log; (pm install -r ${file} > ${file}.log 2>&1; grep -q Success ${file}.log && am start -n io.github.azp3001.batteryoptimizer/.MainActivity; rm -f ${file}) </dev/null >/dev/null 2>&1 &`);
+  for (let i = 0; i < 120; i++) {
+    await new Promise((ok) => setTimeout(ok, 1000));
+    const out = await sh(`cat ${file}.log 2>/dev/null`);
+    if (/UPDATE_INCOMPATIBLE/.test(out)) throw new Error("this app was signed with another key. Uninstall it once and install the new version from github.com/AZP3001/battery-optimizer/releases");
+    if (/Failure|Error/.test(out)) throw new Error(firstError(out));
+  }
+}
+if (SHIZUKU) checkUpdate().catch((e) => modal("Update failed", e.message || String(e), [["OK", "ok", "primary"]]));
 // replugging an allowed phone reconnects by itself
 navigator.usb?.addEventListener("connect", () => setTimeout(autoConnect, 500));
 $("#disconnectBtn").onclick = async () => { const a = adb; adb = null; appsLoaded = false; gateOpen = null; namesRun++; setConnected(""); await a?.close().catch(() => {}); };

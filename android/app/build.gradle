@@ -7,11 +7,21 @@ android {
         applicationId "io.github.azp3001.batteryoptimizer"
         minSdk 24
         targetSdk 35
-        versionCode 1
-        versionName "1.0"
+        // set by the Release workflow: the release tag (the app compares it with GitHub's latest) and the run number
+        versionCode Integer.parseInt((findProperty("appCode") ?: "1").toString())
+        versionName (findProperty("appVersion") ?: "dev").toString()
     }
-    // shortcut: release is signed with the debug key so the APK installs without setup; add a real keystore before publishing to a store.
-    buildTypes { release { signingConfig signingConfigs.debug } }
+    // Updates only install over an app signed with the same key: the Release workflow puts the key from the
+    // ANDROID_KEYSTORE secret here. Local builds without it use the debug key.
+    signingConfigs {
+        release {
+            storeFile file("release.jks")
+            storePassword "battery-optimizer"
+            keyAlias "release"
+            keyPassword "battery-optimizer"
+        }
+    }
+    buildTypes { release { signingConfig file("release.jks").exists() ? signingConfigs.release : signingConfigs.debug } }
     // The app shows the same web app as the website, plus the script it reads its app table from.
     sourceSets.main.assets.srcDirs += layout.buildDirectory.dir("web").get().asFile
 }
