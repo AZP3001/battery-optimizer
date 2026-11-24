@@ -40,9 +40,7 @@ The same web app as an APK that runs on the phone, no computer needed. It sends 
 1. Install Shizuku and start it with **Wireless debugging** (Android 11+; the steps are in the Shizuku app). It has to be started again after every reboot.
 2. Install `battery-optimizer.apk` from [Releases](https://github.com/AZP3001/battery-optimizer/releases), open it, press **Connect** and allow it in Shizuku.
 
-On start the app checks for a newer release; **Update** downloads it, installs it through Shizuku and reopens the app.
-
-Backup to a folder is not available in the app (it needs Chrome or Edge on a computer). Build it yourself: `cd android && ./gradlew assembleRelease` (needs the Android SDK). The Release workflow signs the APK with the key in the `ANDROID_KEYSTORE` secret (a base64 `.jks`, alias `release`, password `battery-optimizer`); it must never change, or installed apps can no longer update themselves.
+Backup to a folder is not available in the app (it needs Chrome or Edge on a computer). Build it yourself: `cd android && ./gradlew assembleRelease` (needs the Android SDK). Each release is signed with a new key, so uninstall the old app before installing a new version.
 
 ## Windows
 

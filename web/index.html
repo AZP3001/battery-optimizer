@@ -3260,36 +3260,6 @@ if (SHIZUKU) {
   document.addEventListener("visibilitychange", () => { if (!document.hidden) autoConnect(); });
 }
 
-// App updates: on start, compare the app's version (the release tag it was built for) with GitHub's latest release.
-// Update downloads the APK through the app, installs it with Shizuku and opens the app again.
-async function checkUpdate() {
-  const mine = SHIZUKU.version?.() || "";
-  if (!/^v\d/.test(mine)) return;   // built by hand, not from a release
-  const get = (url) => fetch("/__get?url=" + encodeURIComponent(url));
-  const r = await get("https://api.github.com/repos/AZP3001/battery-optimizer/releases/latest");
-  if (!r.ok) return;
-  const rel = await r.json(), asset = rel.assets?.find((a) => a.name.endsWith(".apk"));
-  if (!asset || rel.tag_name === mine) return;
-  if (await modal(`Update to ${rel.tag_name}?`, `You have ${mine}. The app downloads the new version, installs it and opens again by itself.`,
-    [["Later", ""], ["Update", "ok", "primary"]]) !== "ok") return;
-  if (!adb) await tryConnect();
-  if (!adb) return;
-  toast("Downloading the update...");
-  const dl = await get(asset.browser_download_url);
-  if (!dl.ok) throw new Error("the update could not be downloaded");
-  const file = "/data/local/tmp/battery-optimizer-update.apk";
-  await pushBlob(await dl.blob(), file, (pc) => toast(`Copying the update ${pc}%`));
-  toast("Installing the update, the app restarts...");
-  // Installing replaces this app and ends it, so the install runs on its own in the background and starts the app again.
-  await sh(`rm -f ${file}.log; (pm install -r ${file} > ${file}.log 2>&1; grep -q Success ${file}.log && am start -n io.github.azp3001.batteryoptimizer/.MainActivity; rm -f ${file}) </dev/null >/dev/null 2>&1 &`);
-  for (let i = 0; i < 120; i++) {
-    await new Promise((ok) => setTimeout(ok, 1000));
-    const out = await sh(`cat ${file}.log 2>/dev/null`);
-    if (/UPDATE_INCOMPATIBLE/.test(out)) throw new Error("this app was signed with another key. Uninstall it once and install the new version from github.com/AZP3001/battery-optimizer/releases");
-    if (/Failure|Error/.test(out)) throw new Error(firstError(out));
-  }
-}
-if (SHIZUKU) checkUpdate().catch((e) => modal("Update failed", e.message || String(e), [["OK", "ok", "primary"]]));
 // replugging an allowed phone reconnects by itself
 navigator.usb?.addEventListener("connect", () => setTimeout(autoConnect, 500));
 $("#disconnectBtn").onclick = async () => { const a = adb; adb = null; appsLoaded = false; gateOpen = null; namesRun++; setConnected(""); await a?.close().catch(() => {}); };
