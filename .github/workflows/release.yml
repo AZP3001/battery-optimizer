@@ -20,6 +20,7 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: "17" }
       - run: |
+          sed -i "s/Version [0-9.]*<\/p>/Version ${TAG#v}<\/p>/" web/index.html   # the app shows its own version, not the website's
           cd android && ./gradlew --no-daemon assembleRelease -PappVersion="$TAG" -PappCode="$GITHUB_RUN_NUMBER"
           cp app/build/outputs/apk/release/app-release.apk ../battery-optimizer.apk
         env:

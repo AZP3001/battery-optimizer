@@ -6,6 +6,19 @@
 <meta name="color-scheme" content="dark">
 <title>Battery Optimizer</title>
 <meta name="description" content="Make your Android phone's battery last longer, straight from the browser over USB.">
+<script>
+  // Phones have no developer console: show script errors on the page, so a broken page says why.
+  function showPageError(text) {
+    const d = document.createElement("pre");
+    d.style.cssText = "position:fixed;left:8px;right:8px;bottom:8px;z-index:99;margin:0;background:#6e1b1b;color:#fff;padding:10px;border-radius:8px;white-space:pre-wrap;font:12px monospace";
+    d.textContent = "Page error, please report it: " + text;
+    d.onclick = () => d.remove();
+    document.body.append(d);
+  }
+  addEventListener("error", (e) => showPageError(e.message + (e.filename ? ` (${e.filename.split("/").pop()}:${e.lineno})` : "")));
+  // A script file that does not load (or syntax this browser lacks) raises no error event, so check the main script finished starting.
+  addEventListener("load", () => setTimeout(() => { if (!window.pageStarted) showPageError("the page script did not start (a file did not load, or this browser is too old)"); }, 5000));
+</script>
 <style>
   :root {
     --bg:#0d1117; --surface:#161b22; --surface2:#1c232c; --hover:#222b36; --line:#2b333e;
@@ -248,6 +261,7 @@
     .connect { margin:16px auto; }
     .app { gap:10px; padding:10px 12px; }
     .search { min-width:0; flex:1 1 100%; }
+    .apps-layout, .perm-layout { grid-template-columns:minmax(0, 1fr); }   /* a plain 1fr grows to its widest row */
     .applybar { flex-wrap:wrap; bottom:8px; padding:10px 12px; }
     .applybar .btn { flex:1; }
     dialog { padding:18px; }
@@ -3265,6 +3279,7 @@ navigator.usb?.addEventListener("connect", () => setTimeout(autoConnect, 500));
 $("#disconnectBtn").onclick = async () => { const a = adb; adb = null; appsLoaded = false; gateOpen = null; namesRun++; setConnected(""); await a?.close().catch(() => {}); };
 showTab("apps");
 
+window.pageStarted = true;
 loadTables().catch((e) => log("Could not load the app table, so preinstalled apps are hidden: " + e.message));
 </script>
 </body>
