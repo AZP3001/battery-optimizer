@@ -3089,9 +3089,8 @@ async function uploadTelemetry() {
 // After connecting: ask once per browser; if allowed, upload quietly at most once a day per phone.
 async function autoTelemetry() {
   if (!TELEMETRY_URL) return;
-  // The Android app is the developer's own: it shares without asking (turn it off by clicking the title). The website asks.
-  if (consent() === null && SHIZUKU) setConsent("yes");
-  if (consent() === null) setConsent(await modal("Help improve Battery Optimizer?", CONSENT_TEXT, [["No", ""], ["Yes, share", "ok", "primary"]]) === "ok" ? "yes" : "no");
+  // The developer is the only user, so sharing is on without asking (turn it off by clicking the title).
+  if (consent() === null) setConsent("yes");
   if (consent() !== "yes") return;
   let last = 0; try { last = Number(localStorage.getItem("telemetry_last_" + serial)) || 0; } catch {}
   if (Date.now() - last < 24 * 3600 * 1000) return;
