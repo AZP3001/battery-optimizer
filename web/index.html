@@ -788,16 +788,19 @@ async function restrictApps(keep, backup) {
   // Only what the Battery tool changes is remembered, so RESTORE leaves apps you optimized before alone.
   backup.restricted = [...new Set([...(backup.restricted || []), ...targets.filter((p) => !before.has(p))])].sort();
   backup.whitelist_removed = [...new Set([...(backup.whitelist_removed || []), ...targets.filter((p) => unrestricted.has(p))])].sort();
+  const kept = [...keep].filter((p) => installed.has(p)).sort();
+  backup.whitelist_added = [...new Set([...(backup.whitelist_added || []), ...kept.filter((p) => !unrestricted.has(p))])].sort();
   saveBackup(backup);
   // am kill stops what runs right now but the app still works normally when you open it.
   await inBatches(targets, (p) => [...RESTRICT_OPS.map((op) => `cmd appops set ${p} ${op} ignore`),
     `am set-standby-bucket ${p} restricted`, `dumpsys deviceidle whitelist -${p} >/dev/null 2>&1`, `am kill ${p}`].join("; "));
-  const kept = [...keep].filter((p) => installed.has(p)).sort();
+  // Kept apps are "Unrestricted" (battery optimization off): deep sleep, standby and power saving then never cut
+  // a messenger's call or messages in the background, e.g. a Discord call overnight with the screen off.
   await inBatches(kept, (p) => [...[...RESTRICT_OPS, "START_FOREGROUND"].map((op) => `cmd appops set ${p} ${op} allow`),
-    `am set-standby-bucket ${p} active`].join("; "));
+    `am set-standby-bucket ${p} active`, `dumpsys deviceidle whitelist +${p} >/dev/null 2>&1`].join("; "));
   const now = await restrictedNow();
   const done = targets.filter((p) => now.has(p)).length;
-  log(`  Apps: ${done} of ${targets.length} restricted, ${kept.length} on the keep list left free.`);
+  log(`  Apps: ${done} of ${targets.length} restricted, ${kept.length} on the keep list left free and unrestricted.`);
   if (done < targets.length) log(`  ${targets.length - done} refused the restriction (usually system parts that do not allow it).`);
   return done === targets.length;
 }
@@ -848,6 +851,7 @@ async function restoreAll() {
   await runAll(cmds);
   await inBatches(backup.restricted || [], (p) => [...RESTRICT_OPS.map((op) => `cmd appops set ${p} ${op} default`), `am set-standby-bucket ${p} active`].join("; "));
   await inBatches(backup.whitelist_removed || [], (p) => `dumpsys deviceidle whitelist +${p} >/dev/null 2>&1`);
+  await inBatches(backup.whitelist_added || [], (p) => `dumpsys deviceidle whitelist -${p} >/dev/null 2>&1`);
   localStorage.removeItem(backupKey());
   log("Restored. Apps you optimized with the Apps tab were left as they were.");
   log("Restart the phone once so the app freezer goes back to normal.");

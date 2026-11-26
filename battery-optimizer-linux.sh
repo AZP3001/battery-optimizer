@@ -2410,11 +2410,16 @@ def restrict_apps(keep, backup):
     targets, installed = battery_targets(keep)
     restrict_packages(targets, backup)
     kept = sorted(keep & installed)
+    unrestricted = parse_user_whitelist(adb("dumpsys deviceidle whitelist")[1])
+    backup["whitelist_added"] = sorted(set(backup.get("whitelist_added", [])) | (set(kept) - unrestricted))
+    save_json(BACKUP_FILE, backup)
+    # Kept apps are "Unrestricted" (battery optimization off): deep sleep, standby and power saving then never cut
+    # a messenger's call or messages in the background, e.g. a Discord call overnight with the screen off.
     in_batches(kept, lambda q: "; ".join(
         [f"cmd appops set {q} {op} allow" for op in RESTRICT_OPS + ("START_FOREGROUND",)]
-        + [f"am set-standby-bucket {q} active"]))
+        + [f"am set-standby-bucket {q} active", f"dumpsys deviceidle whitelist +{q} >/dev/null 2>&1"]))
     done = len(set(targets) & restricted_now())
-    print(f"  Apps: {done} of {len(targets)} restricted, {len(kept)} on the keep list left free.")
+    print(f"  Apps: {done} of {len(targets)} restricted, {len(kept)} on the keep list left free and unrestricted.")
     if done < len(targets):
         print(f"  {len(targets) - done} refused the restriction (usually system parts that do not allow it).")
 
@@ -2809,6 +2814,7 @@ def restore_all():
     in_batches(backup.get("restricted", []), lambda q: "; ".join(
         [f"cmd appops set {q} {op} default" for op in RESTRICT_OPS] + [f"am set-standby-bucket {q} active"]))
     in_batches(backup.get("whitelist_removed", []), lambda q: f"dumpsys deviceidle whitelist +{q} >/dev/null 2>&1")
+    in_batches(backup.get("whitelist_added", []), lambda q: f"dumpsys deviceidle whitelist -{q} >/dev/null 2>&1")
     os.remove(BACKUP_FILE)
     print("Restored. Apps you optimized with the old optimize tool were left as they were.")
     print("Restart the phone once so the app freezer goes back to normal.")
