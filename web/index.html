@@ -3013,48 +3013,47 @@ Object.assign(ACTIONS, {
 // Upload address of the telemetry receiver (a Google Apps Script web app). Empty = only "Download" works.
 const TELEMETRY_URL = "https://script.google.com/macros/s/AKfycbzn7RyJcedQQJHIf9dojtzd_Hnsr2XZOCEo_LACHwnCS3wBdS8-aCoC_cGi6eefn9Ev/exec";
 // Only battery-relevant, non-personal values: no names, accounts, numbers, serials, Wi-Fi names, files or messages.
-async function collectTelemetry(step = () => {}) {
-  step(5);
+async function collectTelemetry() {
   const props = ["ro.product.manufacturer", "ro.product.brand", "ro.product.model", "ro.product.device", "ro.build.version.release",
     "ro.build.version.sdk", "ro.build.version.security_patch", "ro.build.display.id", "ro.product.cpu.abilist", "ro.soc.model", "ro.build.version.oneui", "ro.miui.ui.version.name",
     "ro.board.platform", "ro.hardware", "ro.product.first_api_level", "ro.vendor.build.version.release", "ro.build.type"];
-  const p = (await sh(props.map((k) => `echo "${k}=$(getprop ${k})"`).join("; "))).trim().split("\n");
   const settingKeys = [...new Set([...BATTERY_SETTINGS.map(([ns, k]) => `${ns}/${k}`), "global/battery_saver_constants", "global/low_power",
     "global/low_power_sticky", "global/low_power_trigger_level", "global/low_power_sticky_auto_disable_enabled", "system/screen_off_timeout",
     "system/screen_brightness_mode", "system/peak_refresh_rate", "system/min_refresh_rate", "secure/ui_night_mode", "global/airplane_mode_on",
     "global/wifi_on", "global/bluetooth_on", "global/mobile_data", "secure/location_mode", "global/zen_mode", "system/screen_brightness",
     "secure/doze_always_on", "global/data_roaming", "global/preferred_network_mode"])];
-  const sv = (await sh(settingKeys.map((k) => `echo "${k}=$(settings get ${k.replace("/", " ")})"`).join("; "))).trim().split("\n");
-  const doze = (await sh(Object.keys(DOZE_CONSTANTS).map((k) => `echo "${k}=$(device_config get device_idle ${k})"`).join("; "))).trim().split("\n");
-  const kv = (lines) => Object.fromEntries(lines.filter((l) => l.includes("=")).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
-  const batt = parseBattery(await sh("dumpsys battery"));
-  const [size, density, modes, thermal, wakes] = await Promise.all([sh("wm size"), sh("wm density"), sh("dumpsys display | grep -i supportedModes | head -3"),
-    sh("dumpsys thermalservice | grep -m1 'Thermal Status'"), sh("dumpsys power | grep -c PARTIAL_WAKE_LOCK")]);
-  step(25);
-  // battery history since the last full charge: discharge, radio time, what wakes the phone (hardware names, not personal)
-  const stats = await sh("dumpsys batterystats --charged | grep -E 'Time on battery|Total run time|Discharge|discharge:|Screen on:|Screen doze|Mobile radio active|Wifi on:|Wifi running|Phone signal levels|Interactive:|Device idle mode|Device light idling|Connectivity changes|Camera on|Flashlight|Sensor|Wakeup reason|Kernel Wake lock' | head -120");
-  step(45);
-  const sys = await sh(
-    `for c in /sys/devices/system/cpu/cpu*/cpufreq; do echo "$(cat $c/scaling_governor 2>/dev/null) $(cat $c/cpuinfo_max_freq 2>/dev/null)"; done | sort | uniq -c | tr '\\n' ';'; echo; ` +
-    "grep -E 'MemTotal|SwapTotal' /proc/meminfo | tr -s ' ' | tr '\n' ';'; echo; dumpsys activity services | grep -c ServiceRecord; dumpsys jobscheduler | grep -c 'JOB #'");
+  const kv = (out) => Object.fromEntries(out.trim().split("\n").filter((l) => l.includes("=")).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
+  const UID_POWER = /^\s+U(?:ID|id) [u0-9a]+: [0-9.]+/;
+  // Everything at once, and each slow dump only once: batterystats gives the history, per-app use and screen-on time.
+  const [p, sv, doze, battOut, size, density, modes, thermal, power, statsAll, sys, buckets, whitelist, features] = await Promise.all([
+    sh(props.map((k) => `echo "${k}=$(getprop ${k})"`).join("; ")),
+    sh(settingKeys.map((k) => `echo "${k}=$(settings get ${k.replace("/", " ")})"`).join("; ")),
+    sh(Object.keys(DOZE_CONSTANTS).map((k) => `echo "${k}=$(device_config get device_idle ${k})"`).join("; ")),
+    sh("dumpsys battery"), sh("wm size"), sh("wm density"), sh("dumpsys display | grep -i supportedModes | head -3"),
+    sh("dumpsys thermalservice | grep -m1 'Thermal Status'"), sh("dumpsys power | grep WAKE_LOCK"),
+    sh("dumpsys batterystats --charged | grep -E 'Time on battery|Total run time|Discharge|discharge:|Screen on:|Screen doze|Mobile radio active|Wifi on:|Wifi running|Phone signal levels|Interactive:|Device idle mode|Device light idling|Connectivity changes|Camera on|Flashlight|Sensor|Wakeup reason|Kernel Wake lock|^ +U(ID|id) [u0-9a]+: [0-9.]+'"),
+    sh(`for c in /sys/devices/system/cpu/cpu*/cpufreq; do echo "$(cat $c/scaling_governor 2>/dev/null) $(cat $c/cpuinfo_max_freq 2>/dev/null)"; done | sort | uniq -c | tr '\\n' ';'; echo; ` +
+      "grep -E 'MemTotal|SwapTotal' /proc/meminfo | tr -s ' ' | tr '\n' ';'; echo; dumpsys activity services | grep -c ServiceRecord; dumpsys jobscheduler | grep -c 'JOB #'"),
+    sh("am get-standby-bucket 2>/dev/null"), sh("dumpsys deviceidle whitelist"), sh("pm list features"),
+    appsLoaded ? null : loadApps()]);
+  const batt = parseBattery(battOut);
+  const wakes = power.split("\n").filter((l) => l.includes("PARTIAL_WAKE_LOCK")).length;
+  const stats = statsAll.split("\n").filter((l) => !UID_POWER.test(l)).slice(0, 120).join("\n");
+  const screenOn = (statsAll.match(/Screen on: (.*?) \(/) || [])[1]?.replace(/ ?\d+ms/, "");
   const [cpu, mem, services, jobs] = sys.split("\n");
-  step(60);
-  const [buckets, whitelist, features] = await Promise.all([sh("am get-standby-bucket 2>/dev/null"), sh("dumpsys deviceidle whitelist"), sh("pm list features")]);
-  step(75);
-  if (!appsLoaded) await loadApps();
   const byUid = {}; for (const a of APPS) if (a.uid !== undefined) byUid[a.uid] ??= a.p;
-  const useBy = parsePowerUse(await sh("dumpsys batterystats --charged | grep -E '^ +U(ID|id) [u0-9a]+: [0-9.]+'"))
+  const useBy = parsePowerUse(statsAll)
     .reduce((m, [uid, mah]) => { const p = byUid[uid] || (Number(uid) < 10000 ? "android-system" : "other"); m[p] = (m[p] || 0) + mah; return m; }, {});
   const use = Object.entries(useBy).sort((a, b) => b[1] - a[1]).slice(0, 25).map(([p, mah]) => ({ p, mah: Math.round(mah * 10) / 10 }));
   // only who holds a wake lock, never its tag: sync tags can contain account names
-  const awake = [...new Set(parseWakeLocks(await sh("dumpsys power | grep WAKE_LOCK")).map(([uid]) => byUid[uid] || "android-system"))];
+  const awake = [...new Set(parseWakeLocks(power).map(([uid]) => byUid[uid] || "android-system"))];
   return {
     format: 1, created: new Date().toISOString(), tool: document.body.textContent.match(/Version [\d.]+/)?.[0] || "",
     device: kv(p), settings: kv(sv), doze: kv(doze),
     battery: { level: batt.level, temp: batt.temp, health: batt.health ?? null },
     display: { size: size.trim(), density: density.trim(), modes: modes.trim().slice(0, 2000) },
-    thermal: thermal.trim(), wake_locks: parseInt(wakes, 10) || 0, keeping_awake: awake,
-    screen_on_since_charge: await screenOnTime() || null, power_use_mah: use,
+    thermal: thermal.trim(), wake_locks: wakes, keeping_awake: awake,
+    screen_on_since_charge: screenOn || null, power_use_mah: use,
     battery_history: stats.trim().split("\n").map((l) => l.trim()).filter(Boolean),
     cpu: (cpu || "").trim(), memory: (mem || "").trim(),
     running_services: parseInt(services, 10) || 0, scheduled_jobs: parseInt(jobs, 10) || 0,
@@ -3076,14 +3075,11 @@ const shareStatus = (t) => { $("#shareStatus").textContent = t ? "· " + t : "";
 async function uploadTelemetry() {
   let data;
   try {
-    data = JSON.stringify(await queue(() => collectTelemetry((pc) => shareStatus(`Collecting for sharing ${pc}%`))));
-    // fetch cannot report upload progress without a CORS preflight, which Apps Script does not answer; the file is small anyway
-    shareStatus(`Uploading ${fmtBytes(data.length)}...`);
+    data = JSON.stringify(await queue(collectTelemetry));
   } catch (e) { shareStatus(""); throw e; }
   const r = await fetch(TELEMETRY_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: data }).catch((e) => { shareStatus("sharing failed"); throw e; });   // text/plain: a simple request Apps Script accepts
   const t = await r.text();
   if (!r.ok || !t.startsWith("ok")) { shareStatus("sharing failed"); throw new Error("upload failed, the server answered: " + t.slice(0, 200)); }
-  shareStatus(`Shared ✓ (${fmtBytes(data.length)})`); setTimeout(() => shareStatus(""), 8000);
   try { localStorage.setItem("telemetry_last_" + serial, String(Date.now())); } catch {}
 }
 // After connecting: ask once per browser; if allowed, upload quietly at most once a day per phone.
