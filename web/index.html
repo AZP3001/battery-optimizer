@@ -1033,7 +1033,7 @@ function applyMeta(a, m) {
   if (m.label) a.name = m.label;
   if (m.icon) a.icon = m.icon;
 }
-let namesRun = 0;
+let namesRun = 0, namesDone = Promise.resolve();   // namesDone: the first reading of app names
 async function loadNamesAndIcons() {
   const run = ++namesRun;
   const apks = parsePackagePaths(await sh("pm list packages -f -u"));
@@ -1133,7 +1133,7 @@ async function loadApps({ keepSide = false } = {}) {
   appsLoaded = true;
   if (first) log(`Apps: ${all.length} packages on the phone, ${user.size} installed by you, ${APPS.filter((a) => a.tier === 4).length} hidden system parts.`);
   renderApps(); if (!keepSide) renderSide(); renderKeepInfo();
-  if (first) loadNamesAndIcons().catch(showError);
+  if (first) namesDone = loadNamesAndIcons().catch(showError);
 }
 
 function visibleApps() {
@@ -3042,27 +3042,31 @@ async function collectTelemetry() {
   const screenOn = (statsAll.match(/Screen on: (.*?) \(/) || [])[1]?.replace(/ ?\d+ms/, "");
   const [cpu, mem, services, jobs] = sys.split("\n");
   const byUid = {}; for (const a of APPS) if (a.uid !== undefined) byUid[a.uid] ??= a.p;
+  const names = { "android-system": "Android system", other: "Other apps" }; for (const a of APPS) names[a.p] = a.name;
+  const named = (p) => ({ name: names[p] || p, p });
   const useBy = parsePowerUse(statsAll)
     .reduce((m, [uid, mah]) => { const p = byUid[uid] || (Number(uid) < 10000 ? "android-system" : "other"); m[p] = (m[p] || 0) + mah; return m; }, {});
-  const use = Object.entries(useBy).sort((a, b) => b[1] - a[1]).slice(0, 25).map(([p, mah]) => ({ p, mah: Math.round(mah * 10) / 10 }));
+  const use = Object.entries(useBy).sort((a, b) => b[1] - a[1]).slice(0, 25).map(([p, mah]) => ({ ...named(p), mah: Math.round(mah * 10) / 10 }));
   // only who holds a wake lock, never its tag: sync tags can contain account names
   const awake = [...new Set(parseWakeLocks(power).map(([uid]) => byUid[uid] || "android-system"))];
+  const BUCKETS = { 5: "exempted", 10: "active", 20: "working set", 30: "frequent", 40: "rare", 45: "restricted", 50: "never" };
+  const bucketList = [...buckets.matchAll(/^\s*(\S+?):?\s+(\d+)\s*$/gm)].map((m) => ({ ...named(m[1]), bucket: BUCKETS[m[2]] || m[2] }));
   return {
     format: 1, created: new Date().toISOString(), tool: document.body.textContent.match(/Version [\d.]+/)?.[0] || "",
     device: kv(p), settings: kv(sv), doze: kv(doze),
     battery: { level: batt.level, temp: batt.temp, health: batt.health ?? null },
     display: { size: size.trim(), density: density.trim(), modes: modes.trim().slice(0, 2000) },
-    thermal: thermal.trim(), wake_locks: wakes, keeping_awake: awake,
+    thermal: thermal.trim(), wake_locks: wakes, keeping_awake: awake.map(named),
     screen_on_since_charge: screenOn || null, power_use_mah: use,
     battery_history: stats.trim().split("\n").map((l) => l.trim()).filter(Boolean),
     cpu: (cpu || "").trim(), memory: (mem || "").trim(),
     running_services: parseInt(services, 10) || 0, scheduled_jobs: parseInt(jobs, 10) || 0,
-    standby_buckets: buckets.trim().slice(0, 20000),
+    standby_buckets: bucketList.length ? bucketList : buckets.trim().slice(0, 20000),
     // apps allowed to ignore battery optimization ("system,pkg,uid" lines)
-    battery_whitelist: whitelist.trim().split("\n").map((l) => l.split(",").slice(0, 2).join(",")).filter(Boolean),
+    battery_whitelist: whitelist.trim().split("\n").map((l) => l.split(",")).filter((r) => r.length >= 2).map(([type, p]) => ({ ...named(p), type })),
     features: features.split("\n").map((l) => l.replace("feature:", "").trim()).filter(Boolean),
     // package names only (public store IDs) and how the tool treats them
-    apps: APPS.map((a) => ({ p: a.p, tier: a.tier, removed: a.removed, off: a.off, boot: a.boot, optimized: a.optimized, bg_off: a.bgOff, data_off: a.dataOff })),
+    apps: APPS.map((a) => ({ name: a.name, p: a.p, tier: a.tier, removed: a.removed, off: a.off, boot: a.boot, optimized: a.optimized, bg_off: a.bgOff, data_off: a.dataOff })),
   };
 }
 const CONSENT_TEXT = "Share battery-related info about this phone with the developer, only to improve this tool? It is sent automatically, at most once a day per phone:\n\n" +
@@ -3072,10 +3076,13 @@ const CONSENT_TEXT = "Share battery-related info about this phone with the devel
 const consent = () => { try { return localStorage.getItem("telemetry_consent"); } catch { return null; } };
 const setConsent = (v) => { try { localStorage.setItem("telemetry_consent", v); } catch {} };
 const shareStatus = (t) => { $("#shareStatus").textContent = t ? "· " + t : ""; };
+// Real app names are read in the background after connecting; wait for them so the data names apps, not only packages.
+async function namesReady() { if (!appsLoaded) await queue(loadApps); await namesDone; }
 async function uploadTelemetry() {
   let data;
   try {
-    data = JSON.stringify(await queue(collectTelemetry));
+    await namesReady();
+    data = JSON.stringify(await queue(collectTelemetry), null, 2);   // indented: readable in JSON viewer apps
   } catch (e) { shareStatus(""); throw e; }
   const r = await fetch(TELEMETRY_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: data }).catch((e) => { shareStatus("sharing failed"); throw e; });   // text/plain: a simple request Apps Script accepts
   const t = await r.text();
@@ -3109,7 +3116,8 @@ async function debugMenu() {
   if (choice === "share" && !on && await modal("Share phone info?", CONSENT_TEXT.replace(" It is sent automatically, at most once a day per phone:", ":"), [["Cancel", ""], ["Share", "ok", "primary"]]) !== "ok") return;
   toast("Collecting phone info...");
   if (choice === "dl") {
-    const data = JSON.stringify(await queue(collectTelemetry), null, 1);
+    await namesReady();
+    const data = JSON.stringify(await queue(collectTelemetry), null, 2);
     const a = el("a"); a.href = URL.createObjectURL(new Blob([data], { type: "application/json" }));
     a.download = `battery-optimizer-telemetry-${Date.now()}.json`; document.body.append(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000); return;
