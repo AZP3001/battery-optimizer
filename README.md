@@ -7,13 +7,13 @@ ADB-based battery optimizer and cleanup tool for Android. Runs from Linux, Windo
 ## Features
 
 - **MAX BATTERY**: power saving, dark mode, deep sleep, battery settings, app restrictions and background data blocking in one step. `RESTORE` undoes it.
-- **Extra savers** (optional, never applied by MAX BATTERY): 5G off, diagnostics apps off, lower screen resolution, 85% charge limit on Samsung.
+- **Extra savers** (optional, never applied by MAX BATTERY): 5G off, diagnostics apps off, lower screen resolution, refresh rate (variable up to the screen's maximum, capped, or always the maximum; Samsung too), 85% charge limit on Samsung.
 - **Uninstall anything**: every package, Google services and system parts included, marked unsafe and behind a double confirmation (confirm, then typing REMOVE). Without root a preinstalled app is removed for your user with its data; its file stays in the read-only system image.
 - **Bloatware**: remove preinstalled apps (Netflix, Meta services, ...) for your user; they can be brought back.
 - **Sleep now**: screen off and straight into deep sleep.
 - **Awake right now**: which apps hold the processor awake, plus screen-on time and heat state.
-- **Top battery users**: apps that used the most battery since the last full charge, ready to restrict.
-- **Battery status**: level, temperature, health and estimated capacity.
+- **Top battery users**: apps that used the most battery since the last full charge, with their share of the total, ready to restrict.
+- **Battery status**: level, temperature, health, full capacity measured by the fuel gauge and how much of its new capacity is left, charge cycles, and the current (mA, W) flowing right now, where the phone exposes them; otherwise an estimate.
 - **Keep list**: apps that keep running in the background (messengers, banking). Everything else is restricted once (no constant killing, so apps don't restart over and over).
 - **App control**: per app or for a selection: background running, wake locks, start at boot, background mobile data, notifications, standby bucket, enable/disable.
 - **Deep sleep**: Doze 30 s after screen off (on phones that allow it over USB; otherwise quick doze via power saving).

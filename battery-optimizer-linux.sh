@@ -1689,13 +1689,12 @@ def packages_to_keep():
 
 def essential_packages():
     """Home screen, keyboard, calls, SMS, assistant, accessibility, notification listeners and VPN."""
-    text = adb("cmd package resolve-activity --brief -c android.intent.category.HOME "
-               "-a android.intent.action.MAIN")[1]
-    for role in ("SMS", "DIALER", "HOME", "ASSISTANT"):
-        text += "\n" + adb(f"cmd role get-role-holders android.app.role.{role}")[1].replace(";", "\n")
-    for key in ("default_input_method", "enabled_accessibility_services",
-                "enabled_notification_listeners", "always_on_vpn_app"):
-        text += "\n" + adb(f"settings get secure {key}")[1].replace(":", "\n")
+    # one adb call; "echo" keeps outputs without a final newline apart
+    commands = ["cmd package resolve-activity --brief -c android.intent.category.HOME -a android.intent.action.MAIN"]
+    commands += [f"cmd role get-role-holders android.app.role.{role}" for role in ("SMS", "DIALER", "HOME", "ASSISTANT")]
+    commands += [f"settings get secure {key}" for key in ("default_input_method", "enabled_accessibility_services",
+                                                          "enabled_notification_listeners", "always_on_vpn_app")]
+    text = re.sub("[;:]", "\n", adb("; echo; ".join(commands))[1])
     return {re.split(r"[/\s]", line.strip())[0] for line in text.splitlines() if "." in line}
 
 
@@ -2136,6 +2135,7 @@ BATTERY_SETTINGS = [
     ("secure", "doze_double_tap_gesture", "0", False, "Double tap to check phone: off"),
     ("secure", "adaptive_sleep", "0", False, "Screen attention (camera watches your face): off"),
     ("system", "peak_refresh_rate", "60.0", False, "Refresh rate: 60 Hz"),
+    ("system", "min_refresh_rate", "0.0", False, "Forced peak refresh rate: off (otherwise it overrides the 60 Hz limit)"),
     ("system", "screen_brightness_mode", "1", False, "Adaptive brightness: on"),
     ("secure", "adaptive_connectivity_enabled", "1", False, "Adaptive connectivity (4G when 5G is not needed): on"),
     ("secure", "adaptive_charging_enabled", "1", True, "Adaptive charging (longer battery lifespan): on"),
@@ -2191,6 +2191,8 @@ RADIOS = [  # (name, state command, on, off)
     ("NFC", "dumpsys nfc | grep -m1 mState=", "svc nfc enable", "svc nfc disable"),
     ("Location", "cmd location is-location-enabled", "cmd location set-location-enabled true",
      "cmd location set-location-enabled false"),
+    ("Airplane mode", "settings get global airplane_mode_on", "cmd connectivity airplane-mode enable",
+     "cmd connectivity airplane-mode disable"),
 ]
 
 
@@ -2243,16 +2245,53 @@ def power_saving_on():
     return "1" in adb("settings get global low_power; settings get global low_power_sticky")[1].split()[:2]
 
 
+# "dumpsys battery" plus the fuel gauge's own numbers, where the phone lets the shell read them.
+BATTERY_CMD = ('dumpsys battery; for f in charge_full charge_full_design cycle_count current_now voltage_now; '
+               'do echo "#$f=$(cat /sys/class/power_supply/battery/$f 2>/dev/null)"; done')
+# The head of "dumpsys batterystats": learned and design capacity, screen-on time. One slow dump, read once.
+STATS_HEAD = "dumpsys batterystats --charged | grep -m6 -E 'Screen on:|battery capacity'"
+
+
 def parse_battery(text):
-    """Level, temperature, health and estimated full capacity (mAh) from "dumpsys battery"."""
+    """Level, temperature, health, full capacity (mAh), wear, charge cycles and the current flowing right now,
+    from BATTERY_CMD output (plain "dumpsys battery" works too) and optionally STATS_HEAD output."""
     def num(key):
         m = re.search(rf"^\s*{key}: (-?\d+)", text, re.M)
         return int(m[1]) if m else None
+
+    fs = parse_marked(text)
+
+    def raw(key):
+        v = fs.get(key, "")
+        return abs(int(v)) if re.fullmatch(r"-?\d+", v) and int(v) else None
+
+    def learned(pattern):
+        m = re.search(pattern, text)
+        return int(m[1]) if m and int(m[1]) > 0 else None
+
+    def mah(v):   # µAh on most phones, mAh on a few
+        return None if v is None else round(v / 1000 if v > 100000 else v)
+
     level, temp, counter = num("level"), num("temperature"), num("Charge counter")
     health = {1: "unknown", 2: "good", 3: "overheated", 4: "dead", 5: "over voltage", 6: "failed", 7: "cold"}.get(num("health"))
-    # charge counter is what is in the battery now (uAh); below 20% the estimate gets too rough
-    capacity = round(counter / 1000 * 100 / level) if counter and counter > 0 and level and level >= 20 else None
-    return {"level": level, "temp": temp / 10 if temp is not None else None, "health": health, "capacity": capacity}
+    # measured by the fuel gauge first; else charge counter (uAh now) / level, too rough below 20%
+    full = mah(raw("charge_full"))
+    full = full if full is not None else learned(r"Last learned battery capacity: (\d+)")
+    design = mah(raw("charge_full_design"))
+    design = design if design is not None else learned(r"Estimated battery capacity: (\d+)")
+    capacity = full if full is not None else (
+        round(counter / 1000 * 100 / level) if counter and counter > 0 and level and level >= 20 else None)
+    ratio = full / design if full and design else 0
+    ua, uv = raw("current_now"), raw("voltage_now")
+    if uv is None and (num("voltage") or 0) > 0:
+        uv = num("voltage") * 1000
+    ma = None if ua is None else ua if ua < 10000 else ua / 1000   # µA on most phones, mA on a few
+    volts = None if uv is None else uv / 1e6 if uv > 100000 else uv / 1000
+    return {"level": level, "temp": temp / 10 if temp is not None else None, "health": health, "capacity": capacity,
+            "measured": full is not None, "design": design,
+            "wear": round(ratio * 100) if 0.5 < ratio < 1.15 else None,   # outside that the design value is made up
+            "cycles": raw("cycle_count"), "ma": None if ma is None else round(ma),
+            "watts": ma * volts / 1000 if ma is not None and volts else None, "charging": num("status") == 2}
 
 
 def battery_line(text):
@@ -2262,9 +2301,22 @@ def battery_line(text):
         parts.append(f"{b['temp']:.1f} °C")
     if b["health"]:
         parts.append(f"health {b['health']}")
-    if b["capacity"]:
+    if b["capacity"] and b["measured"]:
+        wear = f" ({b['wear']}% of the {b['design']} mAh it had new)" if b["wear"] else ""
+        parts.append(f"{b['capacity']} mAh when full{wear}")
+    elif b["capacity"]:
         parts.append(f"about {b['capacity']} mAh when full (estimate)")
+    if b["cycles"]:
+        parts.append(f"{b['cycles']} charge cycles")
+    if b["ma"] is not None:
+        watts = f" ({b['watts']:.1f} W)" if b["watts"] else ""
+        parts.append(f"{'charging at' if b['charging'] else 'using'} {b['ma']} mA{watts} now")
     return ", ".join(parts)
+
+
+def refresh_rates(modes):
+    """Refresh rates the screen offers (Hz, 60 and up), from "dumpsys display" supported modes."""
+    return sorted({round(float(f)) for f in re.findall(r"fps=([\d.]+)", modes)} - set(range(60)))
 
 
 THERMAL = {"0": "normal", "1": "light heat", "2": "moderate heat", "3": "severe heat", "4": "critical heat",
@@ -2596,6 +2648,7 @@ def extras_menu(backup):
         tele = [p for p in TELEMETRY_APPS if p in installed]
         disp = parse_display(adb("wm size; wm density")[1])
         charge = adb("settings get global protect_battery")[1].strip()
+        rates = refresh_rates(adb("dumpsys display | grep -i supportedModes")[1])
         g_off = bool(masks) and not any(has_5g(m) for m in masks.values())
         tele_off = bool(tele) and all(p in off for p in tele)
         rows, acts = [], []
@@ -2609,6 +2662,10 @@ def extras_menu(backup):
             now = f"{disp[3]} wide" if disp[3] else "native"
             rows.append(f"      Screen resolution: {now} (pick one of the resolutions the phone offers)")
             acts.append("res")
+        if len(rates) > 1:
+            peak = adb("settings get system peak_refresh_rate")[1].strip()
+            rows.append(f"      Refresh rate: limit {peak if peak != 'null' else 'phone default'} (variable, capped, or always {rates[-1]} Hz)")
+            acts.append("rate")
         if charge in ("0", "1"):
             rows.append(f"[{'ON ' if charge == '1' else 'OFF'}] Limit charging (Samsung): stops at 85%, or 80% on One UI 6.1 and newer. Longer battery lifespan, less runtime per charge")
             acts.append("charge")
@@ -2661,6 +2718,22 @@ def extras_menu(backup):
                 save_json(BACKUP_FILE, backup)
                 # density shrinks with the width so text and icons keep their size
                 adb("wm size reset; wm density reset" if sw == w else f"wm size {sw}x{sh_}; wm density {int(d * sw / w + 0.5)}")
+        elif act == "rate":
+            top = rates[-1]
+            choices = [(f, 0) for f in rates] + [(top, top)]
+            labels = [f"Variable, up to {f} Hz" if f == top else f"Up to {f} Hz{' (saves the most)' if f == rates[0] else ''}" for f in rates]
+            pickd = pick("Refresh rate", labels + [f"Always {top} Hz (uses the most)"],
+                         "Variable lets the screen slow down when nothing moves | Enter = set | Esc = back")
+            if pickd:
+                peak, low = choices[pickd[0]]
+                keys = {"system/peak_refresh_rate": f"{peak:.1f}", "system/min_refresh_rate": f"{low:.1f}"}
+                if adb("settings get secure refresh_rate_mode")[1].strip() != "null":   # Samsung: 0 = standard, 1 = adaptive
+                    keys["secure/refresh_rate_mode"] = "1" if peak > 60 else "0"
+                saved = backup.setdefault("settings", {})
+                for name in keys:
+                    saved.setdefault(name, adb(f"settings get {name.replace('/', ' ')}")[1].strip())
+                save_json(BACKUP_FILE, backup)
+                run_all([f"settings put {name.replace('/', ' ')} {v}" for name, v in keys.items()])
         elif act == "charge":
             saved = backup.setdefault("settings", {})
             if charge == "1":
@@ -2677,7 +2750,9 @@ def battery_use_menu(backup):
     by_uid = {}
     for package, uid in sorted(package_uids().items()):
         by_uid.setdefault(uid, package)
-    use = [(by_uid[uid], mah) for uid, mah in parse_power_use(out) if uid in by_uid and mah >= 0.1]
+    every = parse_power_use(out)
+    total = sum(mah for _, mah in every) or 1
+    use = [(by_uid[uid], mah) for uid, mah in every if uid in by_uid and mah >= 0.1]
     screen = re.search(r"Screen on: (.*?) \(", adb("dumpsys batterystats --charged | grep -m1 'Screen on:'")[1])
     if screen:
         print(f"Screen on since the last full charge: {re.sub(r' ?[0-9]+ms', '', screen[1])}")
@@ -2694,7 +2769,7 @@ def battery_use_menu(backup):
     labels = load_labels({p: apks[p] for p, _ in use if p in apks})
     while True:
         restricted = restricted_now()
-        rows = [f"{mah:8.1f} mAh  {'[KEEP] ' if p in keep else '[restricted] ' if p in restricted else ''}{labels.get(p) or p} ({p})"
+        rows = [f"{mah:8.1f} mAh {mah / total:4.0%}  {'[KEEP] ' if p in keep else '[restricted] ' if p in restricted else ''}{labels.get(p) or p} ({p})"
                 for p, mah in use]
         chosen = pick("Battery use since the last full charge", ["[ START A NEW MEASUREMENT: forget the numbers so far ]"] + rows,
                       "Biggest first | Enter = restrict | Tab = select several | Esc = back", multi=True)
@@ -2721,11 +2796,12 @@ def sleep_now():
 
 
 def battery_status(keep):
-    print(f"\nBattery: {battery_line(adb('dumpsys battery')[1])}")
+    stats = adb(STATS_HEAD)[1]
+    print(f"\nBattery: {battery_line(adb(BATTERY_CMD)[1] + chr(10) + stats)}")
     thermal = re.search(r"Thermal Status: (\d)", adb("dumpsys thermalservice | grep -m1 'Thermal Status'")[1])
     if thermal:
         print(f"Temperature state: {THERMAL.get(thermal[1], thermal[1])} (heat wears the battery out faster)")
-    screen = re.search(r"Screen on: (.*?) \(", adb("dumpsys batterystats --charged | grep -m1 'Screen on:'")[1])
+    screen = re.search(r"Screen on: (.*?) \(", stats)
     if screen:
         print(f"Screen on since the last full charge: {re.sub(r' ?[0-9]+ms', '', screen[1])}")
     power = power_saving_on()
@@ -3012,7 +3088,16 @@ def self_check():
     stats = "  Estimated power use (mAh):\n    UID u0a213: 45.6 fg: 1 ( cpu=2 )\n    UID 1000: 12.5\n    Uid u0a7: 0.5\n  u0a213:\n    Wake lock x\n"
     assert parse_power_use(stats) == [("10213", 45.6), ("1000", 12.5), ("10007", 0.5)]
     batt = parse_battery("  level: 80\n  health: 2\n  temperature: 315\n  Charge counter: 3600000\n")
-    assert batt == {"level": 80, "temp": 31.5, "health": "good", "capacity": 4500}
+    assert {k: batt[k] for k in ("level", "temp", "health", "capacity", "measured", "ma")} == \
+        {"level": 80, "temp": 31.5, "health": "good", "capacity": 4500, "measured": False, "ma": None}
+    gauge = parse_battery("  status: 2\n  level: 50\n  voltage: 4000\n#charge_full=4100000\n#charge_full_design=5000000\n"
+                          "#cycle_count=312\n#current_now=-1200000\n#voltage_now=\n")
+    assert (gauge["capacity"], gauge["wear"], gauge["cycles"], gauge["ma"], gauge["charging"]) == (4100, 82, 312, 1200, True)
+    assert abs(gauge["watts"] - 4.8) < 0.01 and "4100 mAh when full (82% of the 5000 mAh it had new)" in battery_line(
+        "level: 50\n#charge_full=4100000\n#charge_full_design=5000000\n")
+    learned = parse_battery("level: 50\n  Estimated battery capacity: 4614 mAh\n  Last learned battery capacity: 4320 mAh\n#current_now=350\n")
+    assert (learned["capacity"], learned["design"], learned["wear"], learned["ma"]) == (4320, 4614, 94, 350)
+    assert refresh_rates("{id=1, fps=120.00001}, {id=2, fps=60.0}, {id=3, fps=30.0}, {id=4, fps=90.0}") == [60, 90, 120]
     assert parse_battery("level: 10\nCharge counter: 400000\n")["capacity"] is None and parse_battery("")["level"] is None
     assert "set-mode 1" in power_saver_command(True) and power_saver_command(False).endswith("cmd battery reset")
     lte_nr = "10001000000000000000"   # bit 20 = 5G, bit 16 = some 4G type

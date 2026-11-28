@@ -516,6 +516,7 @@ const BATTERY_SETTINGS = [
   ["secure", "doze_double_tap_gesture", "0", false, "Double tap to check phone: off"],
   ["secure", "adaptive_sleep", "0", false, "Screen attention (camera watches your face): off"],
   ["system", "peak_refresh_rate", "60.0", false, "Refresh rate: 60 Hz"],
+  ["system", "min_refresh_rate", "0.0", false, "Forced peak refresh rate: off (otherwise it overrides the 60 Hz limit)"],
   ["system", "screen_brightness_mode", "1", false, "Adaptive brightness: on"],
   ["secure", "adaptive_connectivity_enabled", "1", false, "Adaptive connectivity (4G when 5G is not needed): on"],
   ["secure", "adaptive_charging_enabled", "1", true, "Adaptive charging (longer battery lifespan): on"],
@@ -569,6 +570,7 @@ const RADIOS = [  // [name, state command, on, off]
   ["Bluetooth", "settings get global bluetooth_on", "cmd bluetooth_manager enable", "cmd bluetooth_manager disable"],
   ["NFC", "dumpsys nfc | grep -m1 mState=", "svc nfc enable", "svc nfc disable"],
   ["Location", "cmd location is-location-enabled", "cmd location set-location-enabled true", "cmd location set-location-enabled false"],
+  ["Airplane mode", "settings get global airplane_mode_on", "cmd connectivity airplane-mode enable", "cmd connectivity airplane-mode disable"],
 ];
 
 // ---------- parsers (same rules as the script's) ----------
@@ -654,15 +656,41 @@ const powerSaverCmd = (on) => `cmd battery unplug; cmd power set-mode ${on ? 1 :
 async function powerSavingOn() {
   return (await sh("settings get global low_power; settings get global low_power_sticky")).split(/\s+/).slice(0, 2).includes("1");
 }
-// Level, temperature, health and estimated full capacity (mAh) from "dumpsys battery".
+// "dumpsys battery" plus the fuel gauge's own numbers, where the phone lets the shell read them.
+const BATTERY_CMD = 'dumpsys battery; for f in charge_full charge_full_design cycle_count current_now voltage_now; do echo "#$f=$(cat /sys/class/power_supply/battery/$f 2>/dev/null)"; done';
+// The head of "dumpsys batterystats": learned and design capacity, screen-on time. One slow dump, read once.
+const STATS_HEAD = "dumpsys batterystats --charged | grep -m6 -E 'Screen on:|battery capacity'";
+// Level, temperature, health, full capacity (mAh), wear, charge cycles and the current flowing right now, from
+// BATTERY_CMD output (plain "dumpsys battery" works too) and optionally STATS_HEAD output.
 function parseBattery(text) {
   const num = (key) => { const m = text.match(new RegExp(`^\\s*${key}: (-?\\d+)`, "m")); return m ? Number(m[1]) : null; };
+  const fs = parseMarked(text), raw = (k) => /^-?\d+$/.test(fs[k] || "") && Number(fs[k]) ? Math.abs(Number(fs[k])) : null;
+  const learnedMah = (re) => { const m = text.match(re); return m && Number(m[1]) > 0 ? Number(m[1]) : null; };
+  const mah = (v) => v === null ? null : Math.round(v > 100000 ? v / 1000 : v);   // µAh on most phones, mAh on a few
   const level = num("level"), temp = num("temperature"), counter = num("Charge counter");
   const health = { 1: "unknown", 2: "good", 3: "overheated", 4: "dead", 5: "over voltage", 6: "failed", 7: "cold" }[num("health")] || null;
-  // charge counter is what is in the battery now (uAh); below 20% the estimate gets too rough
-  const capacity = counter > 0 && level >= 20 ? Math.round(counter / 1000 * 100 / level) : null;
-  return { level, temp: temp === null ? null : temp / 10, health, capacity };
+  // measured by the fuel gauge first; else charge counter (uAh now) / level, too rough below 20%
+  const full = mah(raw("charge_full")) ?? learnedMah(/Last learned battery capacity: (\d+)/);
+  const design = mah(raw("charge_full_design")) ?? learnedMah(/Estimated battery capacity: (\d+)/);
+  const capacity = full ?? (counter > 0 && level >= 20 ? Math.round(counter / 1000 * 100 / level) : null);
+  const ratio = full && design ? full / design : 0;
+  const wear = ratio > 0.5 && ratio < 1.15 ? Math.round(ratio * 100) : null;   // outside that the design value is made up
+  const ua = raw("current_now"), uv = raw("voltage_now") ?? (num("voltage") > 0 ? num("voltage") * 1000 : null);
+  const ma = ua === null ? null : ua < 10000 ? ua : ua / 1000;                   // µA on most phones, mA on a few
+  const volts = uv === null ? null : uv > 100000 ? uv / 1e6 : uv / 1000;
+  return { level, temp: temp === null ? null : temp / 10, health, capacity, measured: full !== null, design, wear,
+    cycles: raw("cycle_count"), ma: ma === null ? null : Math.round(ma), watts: ma !== null && volts ? ma * volts / 1000 : null, charging: num("status") === 2 };
 }
+function batteryLine(b) {
+  return [b.level === null ? "unknown" : b.level + "%", b.temp !== null && b.temp.toFixed(1) + " °C", b.health && "health " + b.health,
+    b.capacity && (b.measured ? `${b.capacity} mAh when full` + (b.wear ? ` (${b.wear}% of the ${b.design} mAh it had new)` : "") : `about ${b.capacity} mAh when full (estimate)`),
+    b.cycles && `${b.cycles} charge cycles`,
+    b.ma !== null && `${b.charging ? "charging at" : "using"} ${b.ma} mA${b.watts ? ` (${b.watts.toFixed(1)} W)` : ""} now`].filter(Boolean).join(" · ");
+}
+const screenOnFrom = (stats) => (stats.match(/Screen on: (.*?) \(/) || [])[1]?.replace(/ ?\d+ms/, "");
+// Refresh rates the screen offers (Hz, 60 and up), from "dumpsys display" supported modes, and the rate it runs at now.
+const refreshRates = (modes) => [...new Set([...modes.matchAll(/fps=([\d.]+)/g)].map((m) => Math.round(m[1])))].filter((f) => f >= 60).sort((a, b) => a - b);
+const refreshNow = (modes) => { const m = modes.match(/renderFrameRate ([\d.]+)/); return m ? Math.round(m[1]) : null; };
 const THERMAL = { 0: "normal", 1: "light heat", 2: "moderate heat", 3: "severe heat", 4: "critical heat", 5: "emergency", 6: "shutdown" };
 // [[uid, tag]] of the wake locks held right now, from "dumpsys power". A wake lock keeps the processor awake.
 // When a system service holds it for an app, the app's uid is in "WorkSource{...}" and wins.
@@ -674,7 +702,6 @@ function parseWakeLocks(text) {
   }
   return locks;
 }
-const screenOnTime = async () => ((await sh("dumpsys batterystats --charged | grep -m1 'Screen on:'")).match(/Screen on: (.*?) \(/) || [])[1]?.replace(/ ?\d+ms/, "");
 // [[uid, mAh]] biggest first, from the "Estimated power use" lines of "dumpsys batterystats".
 function parsePowerUse(text) {
   const use = {};
@@ -694,11 +721,11 @@ async function nightMode() { const m = (await sh("cmd uimode night")).match(/Nig
 
 // Home screen, keyboard, calls, SMS, assistant, accessibility, notification listeners and VPN.
 async function essentialPackages() {
-  let text = await sh("cmd package resolve-activity --brief -c android.intent.category.HOME -a android.intent.action.MAIN");
-  for (const role of ["SMS", "DIALER", "HOME", "ASSISTANT"]) text += "\n" + (await sh(`cmd role get-role-holders android.app.role.${role}`)).replaceAll(";", "\n");
-  for (const key of ["default_input_method", "enabled_accessibility_services", "enabled_notification_listeners", "always_on_vpn_app"])
-    text += "\n" + (await sh(`settings get secure ${key}`)).replaceAll(":", "\n");
-  return new Set(text.split("\n").filter((l) => l.includes(".")).map((l) => l.trim().split(/[/\s]/)[0]));
+  // one shell call; "echo" keeps outputs without a final newline apart
+  const text = await sh(["cmd package resolve-activity --brief -c android.intent.category.HOME -a android.intent.action.MAIN",
+    ...["SMS", "DIALER", "HOME", "ASSISTANT"].map((r) => `cmd role get-role-holders android.app.role.${r}`),
+    ...["default_input_method", "enabled_accessibility_services", "enabled_notification_listeners", "always_on_vpn_app"].map((k) => `settings get secure ${k}`)].join("; echo; "));
+  return new Set(text.replace(/[;:]/g, "\n").split("\n").filter((l) => l.includes(".")).map((l) => l.trim().split(/[/\s]/)[0]));
 }
 
 async function applySettings(backup) {
@@ -766,17 +793,16 @@ async function restrictedNow() {
 // Apps installed by the user: "pm list packages -3", plus every package that is not a system package,
 // because some phones leave user-installed apps out of "-3".
 async function userPackages(all) {
-  const user = packageNames(await sh("pm list packages -3"));
-  const system = packageNames(await sh("pm list packages -s"));
+  const [user, system] = (await Promise.all([sh("pm list packages -3"), sh("pm list packages -s")])).map(packageNames);
   for (const p of all) if (!system.has(p)) user.add(p);
   return user;
 }
 
 // Your apps and the safe preinstalled extras, minus the keep list and whatever the phone needs to work.
 async function batteryTargets(keep) {
-  const installed = packageNames(await sh("pm list packages"));
+  const [installed, essential] = await Promise.all([sh("pm list packages").then(packageNames), essentialPackages()]);
   const user = await userPackages(installed);
-  const protect = new Set([...(await essentialPackages()), ...keep, ...ALWAYS_KEEP]);
+  const protect = new Set([...essential, ...keep, ...ALWAYS_KEEP]);
   const targets = [...installed].filter((p) => (user.has(p) || TIERS[p]?.[0] === 2) && !protect.has(p) && !PROTECTED_APPS.test(p)).sort();
   return { targets, installed };
 }
@@ -1678,28 +1704,27 @@ async function maxBatteryUi(btn) {
 async function refreshStatus() {
   const ul = $("#statusList"), items = [];
   const add = (ok, text) => items.push([ok, text]);
-  const batt = parseBattery(await sh("dumpsys battery"));
-  const power = await powerSavingOn();
+  const keep = loadKeep();
+  // every reading at once: each one waits on the phone, not on the others
+  const [battOut, stats, thermalOut, power, night, saver, doze, s, restricted] = await Promise.all([sh(BATTERY_CMD), sh(STATS_HEAD),
+    sh("dumpsys thermalservice | grep -m1 'Thermal Status'"), powerSavingOn(), nightMode(), dataSaverOn(), readDoze(), readSettings(),
+    keep && Promise.all([batteryTargets(keep), restrictedNow()])]);
+  const batt = parseBattery(battOut + "\n" + stats);
   $("#phoneBatt").textContent = batt.level === null ? "" : `· ${batt.level}%`;
-  add(true, "Battery: " + [batt.level === null ? "unknown" : batt.level + "%", batt.temp !== null && batt.temp.toFixed(1) + " °C",
-    batt.health && "health " + batt.health, batt.capacity && `about ${batt.capacity} mAh when full (estimate)`].filter(Boolean).join(" · "));
-  const thermal = (await sh("dumpsys thermalservice | grep -m1 'Thermal Status'")).match(/Thermal Status: (\d)/);
+  add(true, "Battery: " + batteryLine(batt));
+  const thermal = thermalOut.match(/Thermal Status: (\d)/);
   if (thermal) add(thermal[1] === "0", `Temperature state: ${THERMAL[thermal[1]] || thermal[1]} (heat wears the battery out faster)`);
-  const screen = await screenOnTime();
+  const screen = screenOnFrom(stats);
   if (screen) add(true, `Screen on since the last full charge: ${screen}`);
   add(power, "Power saving on (paused while charging, back when unplugged)");
-  add((await nightMode()) === "yes", "Dark mode on");
-  add(await dataSaverOn(), "Background mobile data blocked");
-  const doze = await readDoze();
+  add(night === "yes", "Dark mode on");
+  add(saver, "Background mobile data blocked");
   const fast = Object.entries(DOZE_CONSTANTS).every(([k, v]) => doze[k] === v);
   add(fast || power, fast ? "Deep sleep after 30 seconds" : "Deep sleep right after screen off (needs power saving)");
-  const keep = loadKeep();
-  if (keep) {
-    const { targets } = await batteryTargets(keep);
-    const now = await restrictedNow(), done = targets.filter((p) => now.has(p)).length;
+  if (restricted) {
+    const [{ targets }, now] = restricted, done = targets.filter((p) => now.has(p)).length;
     add(done === targets.length, `Apps restricted: ${done} of ${targets.length}`);
   } else add(false, "No keep list yet");
-  const s = await readSettings();
   const set = BATTERY_SETTINGS.filter(([ns, key, , samsung]) => !(samsung && (s[`${ns}/${key}`] ?? "null") === "null"));
   const good = set.filter(([ns, key, value]) => isApplied(key, value, s[`${ns}/${key}`] ?? "null")).length;
   add(good === set.length, `Battery settings: ${good} of ${set.length}`);
@@ -1712,11 +1737,12 @@ async function renderUse() {
   const out = await sh("dumpsys batterystats --charged | grep -E '^ +U(ID|id) [u0-9a]+: [0-9.]+'");
   const byUid = {};
   for (const a of APPS) if (a.uid !== undefined) byUid[a.uid] ??= a;
-  USE = parsePowerUse(out).filter(([uid, mah]) => byUid[uid] && mah >= 0.1).slice(0, 12).map(([uid, mah]) => [byUid[uid], mah]);
+  const all = parsePowerUse(out), total = all.reduce((t, [, mah]) => t + mah, 0);
+  USE = all.filter(([uid, mah]) => byUid[uid] && mah >= 0.1).slice(0, 12).map(([uid, mah]) => [byUid[uid], mah]);
   const keep = currentKeep();
   $("#useSelect").classList.toggle("hidden", !USE.length);
   const extra = [];
-  const screen = await screenOnTime();
+  const screen = screenOnFrom(await sh(STATS_HEAD));
   if (screen) extra.push(el("p", "", `Screen on: ${screen}`));
   const locks = parseWakeLocks(await sh("dumpsys power | grep WAKE_LOCK")).slice(0, 8);
   if (locks.length) extra.push(el("p", "", "Keeping the phone awake right now: " + locks.map(([uid, tag]) => `${byUid[uid]?.name || "Android system"} (${tag})`).join(", ")));
@@ -1724,17 +1750,16 @@ async function renderUse() {
   $("#useList").replaceChildren(...extra, ...USE.map(([a, mah]) => {
     const row = el("div", "userow"), name = el("span", "name", a.name);
     row.append(iconEl(a, 24), name, ...(keep.has(a.p) ? [el("span", "badge blue", "Keep")] : a.bgOff ? [el("span", "badge green", "Restricted")] : []),
-      el("span", "size", mah.toFixed(1) + " mAh"));
+      el("span", "size", `${mah.toFixed(1)} mAh · ${Math.round(mah / total * 100)}%`));
     return row;
   }));
 }
 
 // ---------- settings tab (applied with Apply) ----------
 async function renderSettings() {
-  const box = $("#settingsRows");
-  const now = await readSettings(), backup = loadBackup();
-  const power = await powerSavingOn();
-  const night = await nightMode();
+  const box = $("#settingsRows"), backup = loadBackup();
+  const [now, power, night, masks, chargeOut, dispOut, modes] = await Promise.all([readSettings(), powerSavingOn(), nightMode(), netTypes(),
+    sh("settings get global protect_battery"), sh("wm size; wm density"), sh("dumpsys display | grep -iE 'supportedModes|renderFrameRate'")]);
   const st = stage($("#settingsCount"), $("#settingsApply"));
   const rows = [], switches = [];
   const add = (key, label, help, on, applyFn, disabled) => {
@@ -1762,12 +1787,39 @@ async function renderSettings() {
       return prev === "null" || prev === undefined ? `settings delete ${ns} ${key}` : `settings put ${ns} ${key} ${q(prev)}`;
     }, isApplied(key, value, cur) && old === undefined);
   };
-  for (const s of BATTERY_SETTINGS) addSetting(s, now[`${s[0]}/${s[1]}`] ?? "null");
+  // Refresh rate: one choice instead of separate switches, when the screen offers more than one rate.
+  const rates = refreshRates(modes), REFRESH = ["system/peak_refresh_rate", "system/min_refresh_rate", "secure/refresh_rate_mode"];
+  let rateSel = null;
+  for (const s of BATTERY_SETTINGS) {
+    const name = `${s[0]}/${s[1]}`;
+    if (rates.length > 1 && REFRESH.includes(name)) { if (!rateSel) rows.push(refreshRow()); continue; }
+    addSetting(s, now[name] ?? "null");
+  }
+  function refreshRow() {
+    const top = rates.at(-1), cur = (n) => now[n] ?? "null", samsung = cur(REFRESH[2]) !== "null";
+    rateSel = el("select"); rateSel.setAttribute("aria-label", "Refresh rate");
+    rateSel.append(...rates.map((f, i) => new Option(f === top ? `Variable, up to ${f} Hz` : `Up to ${f} Hz${i === 0 ? " (saves the most)" : ""}`, f)),
+      new Option(`Always ${top} Hz (uses the most)`, "fixed"));
+    // Samsung uses its own switch (0 = standard, else adaptive); elsewhere peak = upper limit, min = lower limit
+    const peak = cur(REFRESH[0]) === "null" ? top : Number(cur(REFRESH[0])), min = Number(cur(REFRESH[1])) || 0;
+    const was = samsung ? (cur(REFRESH[2]) === "0" ? rates[0] : top) : min >= top - 0.5 ? "fixed" : [...rates].reverse().find((f) => f <= peak + 0.5) ?? rates[0];
+    rateSel.value = String(was);
+    const hz = refreshNow(modes);
+    const row = settingRow("Refresh rate", `Variable lets the screen slow down when nothing moves (LTPO screens go down to 1-10 Hz). Lower = longer battery.${hz ? ` Running at ${hz} Hz right now.` : ""}`, rateSel);
+    rateSel.onchange = () => st.mark("refresh", row, rateSel.value !== String(was), async () => {
+      const v = rateSel.value, peakTo = v === "fixed" ? top : Number(v), minTo = v === "fixed" ? top : 0;
+      const b = loadBackup(); b.settings ??= {};
+      for (const n of REFRESH) if (n !== REFRESH[2] || samsung) b.settings[n] ??= cur(n);
+      saveBackup(b);
+      return `settings put system peak_refresh_rate ${peakTo.toFixed(1)}; settings put system min_refresh_rate ${minTo.toFixed(1)}` +
+        (samsung ? `; settings put secure refresh_rate_mode ${peakTo > 60 ? 1 : 0}` : "");
+    });
+    return row;
+  }
   const main = switches.length;   // "Switch all on" stops here
 
   // --- stronger savers: optional, never applied by MAX BATTERY or "Switch all on"
   rows.push(el("div", "section-title", "Stronger savers (optional, not part of MAX BATTERY)"));
-  const masks = await netTypes();
   if (Object.keys(masks).length) {
     add("5g", "5G off", "Uses 4G, which needs less power, most of all with weak signal", !Object.values(masks).some(has5g), async (v) => {
       const b = loadBackup(); b.net_types ??= {};
@@ -1794,11 +1846,11 @@ async function renderSettings() {
         return tele.map((a) => `pm ${v ? "disable-user" : "enable"} --user 0 ${q(a.p)}`).join("; ");
       });
   }
-  const charge = (await sh("settings get global protect_battery")).trim();
+  const charge = chargeOut.trim();
   if (charge === "0" || charge === "1")
     addSetting(["global", "protect_battery", "1", true, "Limit charging (Samsung): stops at 85%, or 80% on One UI 6.1 and newer. Longer battery lifespan, less runtime per charge"], charge);
-  const disp = parseDisplay(await sh("wm size; wm density"));
-  const sizes = disp ? displaySizes(disp, await sh("dumpsys display | grep -i supportedModes")) : [];
+  const disp = parseDisplay(dispOut);
+  const sizes = disp ? displaySizes(disp, modes) : [];
   if (sizes.length > 1) {
     const sel = el("select");
     sel.append(...sizes.map(([w, h]) => new Option(`${sizeName(w)} ${w}x${h}${w === disp.w ? " (native)" : ""}`.trim(), w)));
@@ -1819,7 +1871,10 @@ async function renderSettings() {
   }
   rows.push(el("p", "muted small", "Account sync cannot be switched off over USB: Android has no command for it. Restricted apps already sync far less."));
   box.replaceChildren(...rows);
-  $("#settingsAllOn").onclick = () => switches.slice(0, main).forEach((s) => { if (!s.input.checked && !s.input.disabled) s.input.click(); });
+  $("#settingsAllOn").onclick = () => {
+    switches.slice(0, main).forEach((s) => { if (!s.input.checked && !s.input.disabled) s.input.click(); });
+    if (rateSel) { rateSel.value = String(rates[0]); rateSel.onchange(); }   // MAX BATTERY's choice
+  };
   $("#settingsApply").onclick = () => runButton($("#settingsApply"), async (set) => {
     const cmds = [];
     for (const f of st.changes.values()) cmds.push(await f());
